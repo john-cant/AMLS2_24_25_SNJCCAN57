@@ -18,6 +18,7 @@
 ## 27122024 Comments and modifications for Task B1 CNN Tune
 ## 31122024 Extended dataclasses and enhanced hyper analysis in combination with model scripts
 ## 11012025 Added compare graph function and overfitting callback rather than previous manual option
+## 16032025 Added AMLS2 base functions, plus minor updates to existing functions
 
 #################################################### LIBRARY IMPORTS ##############################
 ## standard python libraries
@@ -27,8 +28,19 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-## set up tensorflow
+## import tensorflow
 import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Multiply, Add, Layer, Lambda, LeakyReLU
+from tensorflow.keras.layers import Input, Conv2D, Flatten, UpSampling2D, Dropout, BatchNormalization, PReLU
+from tensorflow.keras.optimizers import Adam, SGD, RMSprop
+from tensorflow.keras.losses import BinaryCrossentropy, Hinge, MeanAbsoluteError
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.initializers import Constant
+from tensorflow.keras.applications.vgg19 import VGG19
+import tensorflow.keras.backend as K
+from tensorflow.nn import depth_to_space
+
 ## MedMNIST specific libraries loading all relevant items (updated 07122024)
 ##import medmnist
 ##from medmnist import INFO ##, info
@@ -37,6 +49,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
+from skimage.metrics import structural_similarity as ssim
 
 #################################################### SET UP DATACLASSES ##############################
 @dataclass
@@ -171,6 +184,7 @@ class StopOverfittingCallback(tf.keras.callbacks.Callback):
             if self.overfitting_count >= self.patience:
                 print("Stopping training due to persistent overfitting.")
                 self.model.stop_training = True
+
 #################################################### UTILITY FUNCTIONS ##############################
 def dataset_to_numpy(dataset):
     """ change from loaded dataset to numpy arrays
@@ -200,9 +214,6 @@ def get_timestamp():
     ## reformat it into a timestamp with year, month, day and time in hours, minutes and seconds
     ## seconds added to avoid overwriting for short hyperparameter selection runs
     return now.strftime("%Y_%m_%d_at_%H%M%S") #timestamp
-
-#################################################### DATA LOADING ##############################
-
 
 
 ########################################### GRAPHING, SAVING and ANALYSIS ##############################
@@ -281,7 +292,7 @@ def graph_compare(file1,file2,type_flag='accuracy',index_limit=-1,skip=-1):
         the index_limit and skip can be used to restrict the range displayed
         they default to displaying accuracy for the full range
     """
-    if type_flag in ['accuracy','loss']:
+    if type_flag in ['loss','accuracy']:
         ## read in the data
         data1 = pd.read_excel(file1)
         data2 = pd.read_excel(file2)
@@ -524,3 +535,266 @@ def process_best_run(best_run):
                                 optimise=best_run['optimise'].iloc[0],
                                 loss=best_run['loss'].iloc[0]) 
     parameter.save_excel("param_"+str(get_timestamp())+".xlsx")
+
+################################# AMLS2 functions ################################################
+
+class ResizeLayer(Layer):
+    def __init__(self, target_size, **kwargs):
+        super(ResizeLayer, self).__init__(**kwargs)
+        self.target_size = target_size
+
+    def call(self, inputs):
+        return tf.image.resize(inputs, self.target_size)
+
+def display_lr_hr_pairs(dataset, num_samples=5):
+    """
+    Displays LR-HR image pairs from a dataset without using OpenCV.
+
+    Parameters:
+        dataset (tf.data.Dataset): The dataset containing (LR, HR) pairs.
+        num_samples (int): Number of pairs to display.
+    """
+    # Get a batch of images
+    lowres_batch, highres_batch = next(iter(dataset))
+
+    # Convert tensors to NumPy for visualization
+    lowres_batch = lowres_batch.numpy()
+    highres_batch = highres_batch.numpy()
+
+    # Plot the images
+    plt.figure(figsize=(10, num_samples * 3))
+    for i in range(num_samples):
+        plt.subplot(num_samples, 2, 2 * i + 1)
+        plt.imshow(lowres_batch[i])  # Show LR image
+        plt.axis("off")
+        plt.title("Low-Res")
+
+        plt.subplot(num_samples, 2, 2 * i + 2)
+        plt.imshow(highres_batch[i])  # Show HR image
+        plt.axis("off")
+        plt.title("High-Res")
+
+    plt.show()
+
+#################################################### DATA LOADING ##############################
+
+def load_image_pair(lr_path, hr_path):
+    """
+    Loads a low-resolution (LR) and high-resolution (HR) image pair as tensors.
+    """
+    # Load LR image
+    lr = tf.io.read_file(lr_path)
+    lr = tf.image.decode_png(lr, channels=3)
+    lr = tf.image.convert_image_dtype(lr, tf.float32)  # Normalize to [0,1]
+
+    # Resize LR image to MobileNet input size
+    lr = tf.image.resize(lr, [IMG_SIZE, IMG_SIZE])
+
+    # Load HR image
+    hr = tf.io.read_file(hr_path)
+    hr = tf.image.decode_png(hr, channels=3)
+    hr = tf.image.convert_image_dtype(hr, tf.float32)  # Normalize to [0,1]
+    # Do we resize HR image to keep its original resolution for training
+    ##hr = tf.image.resize(hr, [IMG_SIZE, IMG_SIZE])
+    hr = tf.image.resize(hr, [IMG_SIZE * UPSCALE_FACTOR, IMG_SIZE * UPSCALE_FACTOR])  # Resize HR to 4x LR size
+
+    return lr, hr  # Return both as tensors
+
+#######################################################################################
+def plot_results(lowres, preds):
+    """
+    Displays low-resolution image and super-resolution image
+    """
+    plt.figure(figsize=(12, 6))
+
+    # Ensure pixel values are within valid range [0,1]
+    lowres = np.clip(lowres, 0, 1)
+    preds  = np.clip(preds, 0, 1)
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(lowres)
+    plt.title("Low-resolution")
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(preds)
+    plt.title("Prediction (Super-Resolution)")
+
+    plt.show()
+
+## Define perceptual loss outside the training loop
+# Load pre-trained VGG19 model (only once, outside the function)
+vgg = VGG19(include_top=False, weights='imagenet', input_shape=(224, 224, 3))
+# input_shape should match your image dimensions
+# Extract features from a specific layer
+loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').output)
+loss_model.trainable = False  # Freeze VGG19 weights
+
+def swish(x):
+    return x * tf.keras.activations.sigmoid(x)
+
+def perceptual_loss(y_true, y_pred):
+    """
+    Calculates the perceptual loss using VGG19 features.
+
+    Args:
+        y_true: Ground truth high-resolution image.
+        y_pred: Predicted high-resolution image.
+
+    Returns:
+        Perceptual loss value.
+    """
+    # Resize y_true and y_pred to (224, 224) before passing to loss_model
+    y_true = tf.image.resize(y_true, (224, 224))
+    y_pred = tf.image.resize(y_pred, (224, 224))
+
+    # Calculate perceptual loss using the pre-loaded loss_model
+    return tf.reduce_mean(tf.square(loss_model(y_true) - loss_model(y_pred)))
+
+def se_block(input_tensor, ratio=16):
+    """Squeeze-and-Excitation block for feature enhancement."""
+    filters = input_tensor.shape[-1]
+    se = GlobalAveragePooling2D()(input_tensor)
+    se = Dense(filters // ratio, activation="relu")(se)
+    se = Dense(filters, activation="sigmoid")(se)
+    return Multiply()([input_tensor, se])
+
+def residual_block(x):
+    """A small ResNet-like block."""
+    res = Conv2D(64, (3, 3), padding="same")(x)
+    res = BatchNormalization()(res)
+    res = PReLU(shared_axes=[1, 2])(res)
+    res = Conv2D(64, (3, 3), padding="same")(res)
+    res = BatchNormalization()(res)
+    return Add()([x, res])  # Skip connection
+
+def srresnet(num_res_blocks: int = 16):
+    """
+    Creates SRResNet model.
+
+    Parameters
+    ----------
+    num_res_blocks: int
+        Number of residual blocks in the model
+        Default=16
+
+    Returns
+    -------
+        SRResNet Model object.
+    """
+    def PReLU_activation(name):
+        return PReLU(Constant(value=0.25), shared_axes=[1,2], name=name)
+
+    def residual_block(layer_input, filters, block_number):
+        """Residual block described in paper"""
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_1")(layer_input)
+        d = PReLU_activation(f"prelu_res_{block_number}")(d)
+        d = BatchNormalization(momentum=0.8, name=f"BN_res_{block_number}_1")(d)
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_2")(d)
+        d = BatchNormalization(momentum=0.8, name=f"BN_res_{block_number}_2")(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(layer_input, scale, i):
+      """
+      """
+      u = Conv2D(256, kernel_size=3, strides=1, padding='same', name=f"conv_up_{i}")(layer_input)
+      # Wrap depth_to_space in a Lambda layer
+      u = Lambda(lambda x: depth_to_space(x, 2), name=f"pix_shuf_{i}")(u)
+      return PReLU_activation(name=f"prelu_up_{i}")(u)
+
+    # ==================
+    # Model Construction
+    # ==================
+
+    lr_image = Input(shape=(None, None, 3))
+    c1 = Conv2D(64, kernel_size=9, strides=1, padding='same', name="Conv_ip")(lr_image)
+    c1 = PReLU_activation(name="prelu_ip")(c1)
+
+    r = residual_block(c1, 64, 0)
+    for i in range(1,num_res_blocks):
+      r = residual_block(r, 64, i)
+
+    c2 = Conv2D(64, kernel_size=3, strides=1, padding='same', name="conv_out")(r)
+    c2 = BatchNormalization(momentum=0.8, name="BN_out")(c2)
+    c2 = Add(name="add_out")([c2, c1])
+
+    u1 = upsample_block(c2, 2, 1)
+    u2 = upsample_block(u1, 2, 2)
+
+    c3 = Conv2D(3, kernel_size=9, strides=1, padding='same', activation="sigmoid", name="conv_final")(u2)
+
+    return Model(lr_image, c3, name="SRResNet")
+
+def edsr(num_filters: int = 64, num_res_blocks: int = 16):
+    """
+    Creates an EDSR model.
+
+    Parameters
+    ----------
+    num_filters: int
+        Number of filters per convolution layer.
+        Default=64
+
+    num_res_blocks: int
+        Number of residual blocks in the model
+        Default=16
+
+    Returns
+    -------
+        EDSR Model object.
+    """
+    DIV2K_RGB_MEAN = np.array([0.4488, 0.4371, 0.4040]) * 255
+    normalize = lambda x: (x - DIV2K_RGB_MEAN) / 127.5
+    denormalize = lambda x: x * 127.5 + DIV2K_RGB_MEAN
+    pixel_shuffle = lambda x: depth_to_space(x, 2)
+
+    def residual_block(layer_input, filters, block_number):
+        """Residual block described in paper"""
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', activation='relu', name=f"conv_res_{block_number}_1")(layer_input)
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_2")(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(layer_input, i) :
+        u = Conv2D(num_filters*4, kernel_size=3, strides=1, padding='same', name=f"conv_up_{i}")(layer_input)
+        u = Lambda(pixel_shuffle, name=f"pix_shuf_{i}")(u)
+        return u
+
+    # ==================
+    # Model Construction
+    # ==================
+
+    x_in = Input(shape=(None, None, 3), name="LR Batch")
+    x = Lambda(normalize, name="normalize_input")(x_in)
+
+    x = r = Conv2D(num_filters, 3, padding='same', name="Conv_ip")(x)
+    for i in range(num_res_blocks):
+        r = residual_block(r, num_filters, i)
+
+    c2 = Conv2D(num_filters, 3, padding='same', name="conv_out")(r)
+    c2 = Add(name="add_out")([x, c2])
+
+    u1 = upsample_block(c2, 1)
+    u2 = upsample_block(u1, 2)
+    c3 = Conv2D(3, 3, padding='same', name="conv_final")(u2)
+
+    x_out = Lambda(denormalize, name="denormalize_output")(c3)
+    return Model(x_in, x_out, name="EDSR")
+
+def calculate_psnr(firstImage, secondImage):
+   # Compute the difference between corresponding pixels
+   diff = np.subtract(firstImage, secondImage)
+   # Get the square of the difference
+   squared_diff = np.square(diff)
+
+   # Compute the mean squared error
+   mse = np.mean(squared_diff)
+
+   # Compute the PSNR
+   max_pixel = 255
+   psnr = 20 * np.log10(max_pixel) - 10 * np.log10(mse)
+
+   return psnr
+
+def ssim_loss(y_true, y_pred):
+    return 1 - tf.image.ssim(y_true, y_pred, max_val=1.0)
