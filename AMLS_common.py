@@ -26,6 +26,7 @@ import datetime
 from dataclasses import dataclass, fields
 import pandas as pd
 import numpy as np
+import glob
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 ## import tensorflow
@@ -51,13 +52,20 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
 from skimage.metrics import structural_similarity as ssim
 
+## Loading the data file using a loader
+DATA_FLAG      = 'X2'        ## defines which dataset to load
+CROP_SIZE      = 224         ## HR crop size
+UPSCALE_FACTOR = 4           ## Factor between LR and HR
+IMG_SIZE       = 224
+BATCH_SIZE     = 4
+
 #################################################### SET UP DATACLASSES ##############################
 @dataclass
 class HyperParameters:
     """ data class to allow storage and passing set of hyperparameters as structure
     """
     learning_rate: float
-    kernel_size: int
+    batch_size: int        ## replaced kernel size
     num_epochs: int
     optimise: str
     loss: str
@@ -184,7 +192,130 @@ class StopOverfittingCallback(tf.keras.callbacks.Callback):
             if self.overfitting_count >= self.patience:
                 print("Stopping training due to persistent overfitting.")
                 self.model.stop_training = True
+############################# DATA SET LOAD ##########################
+def load_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
+    """ load data"""
+    ## Get sorted list of image paths (ensures they match correctly)
+    lr_train_images = sorted(glob.glob(lr_train_folder + "/*.png"))
+    hr_train_images = sorted(glob.glob(hr_train_folder + "/*.png"))
+    ## Make sure we have the same number of images
+    print("Training image lengths",len(lr_train_images),len(hr_train_images))
+    assert len(lr_train_images) == len(hr_train_images), "Mismatch between LR and HR train images!"
+    ## Get sorted list of image paths (ensures they match correctly)
+    lr_val_images = sorted(glob.glob(lr_val_folder + "/*.png"))
+    hr_val_images = sorted(glob.glob(hr_val_folder + "/*.png"))
+    ## Make sure we have the same number of images
+    print("Validation image lengths",len(lr_val_images),len(hr_val_images))
+    assert len(lr_val_images) == len(hr_val_images), "Mismatch between LR and HR validation images!"
+    print("end load")
+    return lr_train_images,hr_train_images,lr_val_images,hr_val_images
+    ### end tested load
 
+def process_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
+    """ process data
+    """
+    ### step 2
+    ## Get sorted lists of training image paths
+    lr_train_paths = sorted(tf.io.gfile.glob(lr_train_folder + "/*.png"))
+    hr_train_paths = sorted(tf.io.gfile.glob(hr_train_folder + "/*.png"))
+    print("Training image paths",len(lr_train_paths),len(hr_train_paths))
+    assert len(lr_train_paths) == len(hr_train_paths), "Mismatch between LR and HR train paths!"
+    ## Create TensorFlow dataset of paths
+    lr_dataset = tf.data.Dataset.from_tensor_slices(lr_train_paths)
+    hr_dataset = tf.data.Dataset.from_tensor_slices(hr_train_paths)
+    ## Zip the datasets together to create (LR, HR) pairs
+    train_dataset = tf.data.Dataset.zip((lr_dataset, hr_dataset))
+    ## Map the function to load images
+    train_dataset = train_dataset.map(load_image_pair, num_parallel_calls=tf.data.AUTOTUNE)
+    ## Batch and shuffle the dataset
+    train_dataset = train_dataset.batch(BATCH_SIZE).shuffle(100).prefetch(tf.data.AUTOTUNE)
+    ## Get sorted lists of validation image paths
+    lr_val_paths = sorted(tf.io.gfile.glob(lr_val_folder + "/*.png"))
+    hr_val_paths = sorted(tf.io.gfile.glob(hr_val_folder + "/*.png"))
+    print("Validation image paths",len(lr_val_paths),len(hr_val_paths))
+    assert len(lr_val_paths) == len(hr_val_paths), "Mismatch between LR and HR validation paths!"
+    ## Create TensorFlow dataset of paths
+    lr_dataset = tf.data.Dataset.from_tensor_slices(lr_val_paths)
+    hr_dataset = tf.data.Dataset.from_tensor_slices(hr_val_paths)
+    ## Zip the datasets together to create (LR, HR) pairs
+    val_dataset = tf.data.Dataset.zip((lr_dataset, hr_dataset))
+    ## Map the function to load images
+    val_dataset = val_dataset.map(load_image_pair, num_parallel_calls=tf.data.AUTOTUNE)
+    ## Batch and shuffle the dataset
+    val_dataset = val_dataset.batch(BATCH_SIZE).shuffle(100).prefetch(tf.data.AUTOTUNE)
+    verbose = 1
+    if verbose == 1:
+        ## print summary stats for training dataset
+        print("\nSummary metrics for train_dataset")
+        print("type:",type(train_dataset))
+        print("length:",len(train_dataset))
+        print("shape:",train_dataset)
+    return train_dataset,val_dataset
+    ## end step2
+
+def test_model(val_dataset,model,BATCH_SIZE,filebase):
+    """
+    """
+    tag       = 0
+    psnr_list = []
+    ssim_list = []
+    # Take min of BATCH_SIZE or 4 images from validation dataset
+    if BATCH_SIZE < 4:
+        testing_set = 4
+    else:
+        testing_set = BATCH_SIZE
+    for lowres, highres in val_dataset.take(testing_set):
+        ## Extract first image from batch
+        lowres  = lowres[0].numpy()  ## Convert Tensor to NumPy array
+        highres = highres[0].numpy()
+        ## Resize instead of cropping
+        lowres = tf.image.resize(lowres, (224, 224)).numpy()
+        ## Expand dims to match model input shape
+        lowres_input = np.expand_dims(lowres, axis=0)  ## Shape: (1, 224, 224, 3)
+        ## Get predictions
+        preds = model.predict(lowres_input)  ## Model outputs batch shape (1, H, W, C)
+        preds = preds[0]  ## Remove batch dimension
+        ## Plot results
+        print("low & pred")
+        plot_results(lowres, preds)
+        print("high & pred")
+        plot_results(highres, preds)
+        psnr_list.append(calculate_psnr(highres,preds))
+        print("psnr",calculate_psnr(highres,preds))
+        ## Find the smallest dimension
+        min_dim = min(highres.shape[0], highres.shape[1], preds.shape[0], preds.shape[1])
+        ## Ensure win_size is at most min_dim and at least 3 (since SSIM requires an odd number ≥3)
+        win_size = min(min_dim, 7)
+        win_size = max(win_size, 3)  ## Ensure it's at least 3
+        win_size = win_size - 1 if win_size % 2 == 0 else win_size  ## Ensure odd
+        print("Using win_size:", win_size)  ## Debugging step
+        print("High-res shape:", highres.shape)
+        print("Preds shape:", preds.shape)
+        ssim_list.append(ssim(highres,preds,channel_axis=-1,win_size=win_size, data_range=1.0))
+        print("ssim",ssim(highres,preds,channel_axis=-1,win_size=win_size, data_range=1.0))
+        tag = tag+1
+    save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="quality")    
+    ###for x in range(0,tag-1):
+    ###  print(x,psnr_list[x],ssim_list[x])
+
+def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase,base_filename="results"):
+    """
+    Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt).
+
+    Args:
+        psnr_list: A list of PSNR values.
+        ssim_list: A list of SSIM values.
+        tag: The upper bound of the range (exclusive).
+        base_filename: The base filename (e.g., "quality").
+    """
+    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"  # Create unique filename
+    try:
+        with open(filename, "w") as f:
+            for x in range(0, tag - 1):
+                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")  # Write to file
+        print(f"Data saved to {filename}")
+    except Exception as e:
+        print(f"Error saving data: {e}")
 #################################################### UTILITY FUNCTIONS ##############################
 def dataset_to_numpy(dataset):
     """ change from loaded dataset to numpy arrays
@@ -283,7 +414,7 @@ def graph(history,summary,parameter,skip=0):
     else:
         plt.legend(['train'], loc='upper right')
     plt.show()
-    print("for model\n",str(summary))
+    ###print("for model\n",str(summary))
     ## no return
 
 def graph_compare(file1,file2,type_flag='accuracy',index_limit=-1,skip=-1):
@@ -376,7 +507,7 @@ def history_to_excel(history,summary,parameter,filebase):
 
 def hyper_process(history,_,parameter):
     """ flexibly reads history and writes to dataframe to simplify analysis
-        packages a return structure of runresult dataframe and paramter set
+        packages a return structure of runresult dataframe and parameter set
         expanded list of parameters that are handled
     """
     keys = list(history.history.keys())
@@ -445,7 +576,7 @@ def analyse_run(run_list,selection,filebase):
             'var_acc': result.var_acc,
             # HyperParameters attributes
             'learning_rate': parameter.learning_rate,
-            'kernel_size': parameter.kernel_size,
+            'batch_size': parameter.batch_size,
             'num_epochs': parameter.num_epochs,
             'num_filter': parameter.num_filter,
             'strides': parameter.strides,
@@ -492,7 +623,7 @@ def analyse_hyperparameters(run_df):
     ## Prepare the input analysis data with hyperparameters as features
     ## doesnt support loss or optimise as they are not numeric values (yet)
     X = run_df[['learning_rate', 'num_epochs', 'num_filter','strides','layers',\
-                'dropout_rate','kernel_size']]  # Hyperparameters
+                'dropout_rate','batch_size']]  # Hyperparameters
     y = run_df['max_acc']  ## Metric to predict should this be accuracy or loss?
     ## Train-test split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -525,7 +656,7 @@ def process_best_run(best_run):
             print(instance,":",best_run[instance].iloc[0])
     ##should be able t do this costruction of parameter more flexibly
     parameter = HyperParameters(learning_rate=best_run['learning_rate'].iloc[0], 
-                                kernel_size=best_run['kernel_size'].iloc[0], 
+                                batch_size=best_run['batch_size'].iloc[0], 
                                 num_epochs=best_run['num_epochs'].iloc[0], 
                                 num_filter=best_run['num_filter'].iloc[0],
                                 layers=best_run['layers'].iloc[0],
@@ -798,3 +929,12 @@ def calculate_psnr(firstImage, secondImage):
 
 def ssim_loss(y_true, y_pred):
     return 1 - tf.image.ssim(y_true, y_pred, max_val=1.0)
+
+def mse_loss(y_true, y_pred):
+    return tf.reduce_mean(tf.square(y_true - y_pred))
+
+def psnr_loss(y_true, y_pred):
+    mse = mse_loss(y_true, y_pred)
+    max_val = 1.0 ## assumes images are normalized.
+    psnr = 10.0 * tf.math.log(tf.square(max_val) / mse) / tf.math.log(10.0)
+    return -psnr ## make it a loss by inverting it.
