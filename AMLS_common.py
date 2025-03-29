@@ -1,3 +1,6 @@
+""" AMLS COMMON FUNCTIONS
+"""
+# pylint: disable=no-member
 ## Common code to support all tasks of AMLS Assigmnent
 ## including the loading the MedMNIST data files into tensorflow format
 ## loading of hyperparameters into single data class structure
@@ -19,32 +22,35 @@
 ## 31122024 Extended dataclasses and enhanced hyper analysis in combination with model scripts
 ## 11012025 Added compare graph function and overfitting callback rather than previous manual option
 ## 16032025 Added AMLS2 base functions, plus minor updates to existing functions
+## 24032025 Played with lpips_loss and updated data loading functions
+## 26032025 Fixed/improved setting of run_result using flexible get_run_metrics function
+## 27032025 Integrated srresnet_plus into this file and updated hyperparameters
+## 29032025 Fixed activation layer parameters in sressnet_plus
+## 29032025 Added edsr_plus with item parameters
 
 #################################################### LIBRARY IMPORTS ##############################
 ## standard python libraries
 import datetime
+import glob
+import functools
 from dataclasses import dataclass, fields
 import pandas as pd
 import numpy as np
-import glob
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 ## import tensorflow
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Multiply, Add, Layer, Lambda, LeakyReLU
-from tensorflow.keras.layers import Input, Conv2D, Flatten, UpSampling2D, Dropout, BatchNormalization, PReLU
-from tensorflow.keras.optimizers import Adam, SGD, RMSprop
-from tensorflow.keras.losses import BinaryCrossentropy, Hinge, MeanAbsoluteError
-from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import GlobalAveragePooling2D,Dense,Multiply,Add,Layer,Lambda
+from tensorflow.keras.layers import Input,Conv2D,Dropout,PReLU, BatchNormalization
+from tensorflow.keras.layers import UpSampling2D
+from tensorflow.keras.optimizers import AdamW
+##from tensorflow.keras.losses import BinaryCrossentropy, MeanAbsoluteError
+##from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.initializers import Constant
 from tensorflow.keras.applications.vgg19 import VGG19
 import tensorflow.keras.backend as K
 from tensorflow.nn import depth_to_space
-
-## MedMNIST specific libraries loading all relevant items (updated 07122024)
-##import medmnist
-##from medmnist import INFO ##, info
 ## sklearn to allow analysis of hyperparameter choices
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
@@ -55,17 +61,15 @@ from skimage.metrics import structural_similarity as ssim
 ## Loading the data file using a loader
 DATA_FLAG      = 'X2'        ## defines which dataset to load
 CROP_SIZE      = 224         ## HR crop size
-UPSCALE_FACTOR = 4           ## Factor between LR and HR
 IMG_SIZE       = 224
-BATCH_SIZE     = 4
 
-#################################################### SET UP DATACLASSES ##############################
+#################################################### SET UP DATACLASSES ########################
 @dataclass
 class HyperParameters:
     """ data class to allow storage and passing set of hyperparameters as structure
     """
     learning_rate: float
-    batch_size: int        ## replaced kernel size
+    batch_size: int
     num_epochs: int
     optimise: str
     loss: str
@@ -74,19 +78,23 @@ class HyperParameters:
     padding: str = "valid"
     dropout_rate: float = 0.2
     layers: int = 3
-    default_activation: str = "relu"
+    activation: str = "Prelu"
+    kernel_size: int = 3
+    scale: int = 4
+    momentum: float = 0.8
+    epsilon: float = 0.00001
 
     def list_parameters(self):
         """ lists all attributes and values in HyperParameters class
         """
         result = ""   ## initalise result
-        # Loop through attributes and get their values
+        ## Loop through attributes and get their values
         for field in fields(HyperParameters):
             attribute_name = field.name
             value = getattr(self, attribute_name)
             result= result+(f"{attribute_name}: {value}"+"\n")
         return result
-    
+
     @classmethod
     def load_excel(cls, file_path: str):
         """
@@ -95,50 +103,81 @@ class HyperParameters:
         """
         # Read the Excel file into a DataFrame
         df_load = pd.read_excel(file_path)
-        # Ensure the file contains at least one row
+        ## Ensure the file contains at least one row
         if df_load.empty:
             raise ValueError(f"The file {file_path} is empty.")
-        # Convert the first row of the DataFrame into a dictionary
+        ## Convert the first row of the DataFrame into a dictionary
         data_dict = df_load.iloc[0].to_dict()
-        # Pass the dictionary as keyword arguments to the dataclass constructor
+        ## Pass the dictionary as keyword arguments to the dataclass constructor
         return cls(**data_dict)
-    
+
     def save_excel(self, file_path: str):
         """
         Saves the dataclass instance to an Excel file.
         """
-        # Convert the dataclass to a dictionary
+        ## Convert the dataclass to a dictionary
         data = self.__dict__
-        # Convert the dictionary into a pandas DataFrame
+        ## Convert the dictionary into a pandas DataFrame
         df_save = pd.DataFrame([data])  # Wrap in a list to create a single-row DataFrame
-        # Save the DataFrame to Excel
+        ## Save the DataFrame to Excel
         df_save.to_excel(file_path, index=False)
 
 @dataclass
 class RunResult:
     """ data class to allow storage and passing of summary run results as structure
     """
-    min_loss: float
-    max_acc: float
-    last_loss: float
-    last_acc: float
-    min_val_loss: float
-    max_val_acc: float
-    last_val_loss: float
-    last_val_acc: float
-    var_loss: float
-    var_acc: float
+    min_loss: float = None
+    max_acc: float = None
+    last_loss: float = None
+    last_acc: float = None
+    min_val_loss: float = None
+    max_val_acc: float = None
+    last_val_loss: float = None
+    last_val_acc: float = None
+    var_loss: float = None
+    var_acc: float = None
 
     def list_runresult(self):
         """ lists all attributes and values in RunResult class
         """
         result = ""   ## initalise result
-        # Loop through attributes and get their values
+        ## Loop through attributes and get their values
         for field in fields(RunResult):
             attribute_name = field.name
             value = getattr(self, attribute_name)
             result= result+(f"{attribute_name}: {value}"+"\n")
         return result
+
+def get_run_metrics(df, **metric_operations):
+    """ Gets specified metrics from a DataFrame and directly loads them into RunResult.
+        the column for data as input to the metric is the first part of the input
+        the exact metrics to be stored are specified by the operation part of the input
+    """
+    results = {}
+    for result_key, (column_name, operation) in metric_operations.items():
+        if column_name not in df.columns:
+            print(f"Warning: Column '{column_name}' not found. Setting {result_key} to None.")
+            results[result_key] = None ## no column found so set to None
+            continue
+        try:
+            if operation == 'min':
+                results[result_key] = float(df[column_name].min())
+            elif operation == 'max':
+                results[result_key] = float(df[column_name].max())
+            elif operation == 'first':
+                results[result_key] = float(df[column_name].iloc[0])
+            elif operation == 'last':
+                results[result_key] = float(df[column_name].iloc[-1])
+            elif operation == 'var':
+                results[result_key] = float(df[column_name].var())
+            else:
+                print(f"Warning: Invalid operation '{operation}' for column '{column_name}'\
+                      . Setting {result_key} to None.")
+                results[result_key] = None ## invalid operation so set to None
+        except Exception as e:
+            print(f"Error calculating {result_key}: {e}. Setting to None.")
+            results[result_key] = None
+    return RunResult(**results) ## dict
 
 class TqdmEpochProgress(tf.keras.callbacks.Callback):
     """ simple progress bar
@@ -165,6 +204,8 @@ class TqdmEpochProgress(tf.keras.callbacks.Callback):
         self.progress_bar.close()
 
 class StopOverfittingCallback(tf.keras.callbacks.Callback):
+    """ Callback to restrict overfitting
+    """
     def __init__(self, patience=3, threshold=0.1):
         """
         Args:
@@ -187,48 +228,33 @@ class StopOverfittingCallback(tf.keras.callbacks.Callback):
                 self.overfitting_count += 1
                 print(f"Overfitting detected at epoch {epoch+1}: Loss Gap = {gap:.4f}")
             else:
-                self.overfitting_count = 0  # Reset if no overfitting in this epoch        
+                self.overfitting_count = 0  # Reset if no overfitting in this epoch
             ## Stop training if material overfitting persists for 'patience' epochs
             if self.overfitting_count >= self.patience:
                 print("Stopping training due to persistent overfitting.")
                 self.model.stop_training = True
-############################# DATA SET LOAD ##########################
-def load_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
-    """ load data"""
-    ## Get sorted list of image paths (ensures they match correctly)
-    lr_train_images = sorted(glob.glob(lr_train_folder + "/*.png"))
-    hr_train_images = sorted(glob.glob(hr_train_folder + "/*.png"))
-    ## Make sure we have the same number of images
-    print("Training image lengths",len(lr_train_images),len(hr_train_images))
-    assert len(lr_train_images) == len(hr_train_images), "Mismatch between LR and HR train images!"
-    ## Get sorted list of image paths (ensures they match correctly)
-    lr_val_images = sorted(glob.glob(lr_val_folder + "/*.png"))
-    hr_val_images = sorted(glob.glob(hr_val_folder + "/*.png"))
-    ## Make sure we have the same number of images
-    print("Validation image lengths",len(lr_val_images),len(hr_val_images))
-    assert len(lr_val_images) == len(hr_val_images), "Mismatch between LR and HR validation images!"
-    print("end load")
-    return lr_train_images,hr_train_images,lr_val_images,hr_val_images
-    ### end tested load
 
-def process_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
-    """ process data
+############################# DATA SET LOAD ##########################
+
+def load_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder,
+              batch_size,upscale_factor):
+    """ load data
     """
-    ### step 2
     ## Get sorted lists of training image paths
     lr_train_paths = sorted(tf.io.gfile.glob(lr_train_folder + "/*.png"))
     hr_train_paths = sorted(tf.io.gfile.glob(hr_train_folder + "/*.png"))
     print("Training image paths",len(lr_train_paths),len(hr_train_paths))
-    assert len(lr_train_paths) == len(hr_train_paths), "Mismatch between LR and HR train paths!"
+    assert len(lr_train_paths) == len(hr_train_paths),"Mismatch between LR and HR train paths!"
     ## Create TensorFlow dataset of paths
     lr_dataset = tf.data.Dataset.from_tensor_slices(lr_train_paths)
     hr_dataset = tf.data.Dataset.from_tensor_slices(hr_train_paths)
     ## Zip the datasets together to create (LR, HR) pairs
     train_dataset = tf.data.Dataset.zip((lr_dataset, hr_dataset))
     ## Map the function to load images
-    train_dataset = train_dataset.map(load_image_pair, num_parallel_calls=tf.data.AUTOTUNE)
+    load_image_pair_partial = functools.partial(load_image_pair, upscale_factor=upscale_factor)
+    train_dataset = train_dataset.map(load_image_pair_partial, num_parallel_calls=tf.data.AUTOTUNE)
     ## Batch and shuffle the dataset
-    train_dataset = train_dataset.batch(BATCH_SIZE).shuffle(100).prefetch(tf.data.AUTOTUNE)
+    train_dataset = train_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
     ## Get sorted lists of validation image paths
     lr_val_paths = sorted(tf.io.gfile.glob(lr_val_folder + "/*.png"))
     hr_val_paths = sorted(tf.io.gfile.glob(hr_val_folder + "/*.png"))
@@ -240,9 +266,9 @@ def process_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
     ## Zip the datasets together to create (LR, HR) pairs
     val_dataset = tf.data.Dataset.zip((lr_dataset, hr_dataset))
     ## Map the function to load images
-    val_dataset = val_dataset.map(load_image_pair, num_parallel_calls=tf.data.AUTOTUNE)
+    val_dataset = val_dataset.map(load_image_pair_partial, num_parallel_calls=tf.data.AUTOTUNE)
     ## Batch and shuffle the dataset
-    val_dataset = val_dataset.batch(BATCH_SIZE).shuffle(100).prefetch(tf.data.AUTOTUNE)
+    val_dataset = val_dataset.batch(batch_size).shuffle(100).prefetch(tf.data.AUTOTUNE)
     verbose = 1
     if verbose == 1:
         ## print summary stats for training dataset
@@ -251,19 +277,18 @@ def process_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder):
         print("length:",len(train_dataset))
         print("shape:",train_dataset)
     return train_dataset,val_dataset
-    ## end step2
 
-def test_model(val_dataset,model,BATCH_SIZE,filebase):
-    """
+def test_model(val_dataset,model,batch_size,filebase):
+    """ test model
     """
     tag       = 0
     psnr_list = []
     ssim_list = []
-    # Take min of BATCH_SIZE or 4 images from validation dataset
-    if BATCH_SIZE < 4:
+    ## Take min of batch_size or 4 images from validation dataset
+    if batch_size < 4:
         testing_set = 4
     else:
-        testing_set = BATCH_SIZE
+        testing_set = batch_size
     for lowres, highres in val_dataset.take(testing_set):
         ## Extract first image from batch
         lowres  = lowres[0].numpy()  ## Convert Tensor to NumPy array
@@ -294,29 +319,26 @@ def test_model(val_dataset,model,BATCH_SIZE,filebase):
         ssim_list.append(ssim(highres,preds,channel_axis=-1,win_size=win_size, data_range=1.0))
         print("ssim",ssim(highres,preds,channel_axis=-1,win_size=win_size, data_range=1.0))
         tag = tag+1
-    save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="quality")    
-    ###for x in range(0,tag-1):
-    ###  print(x,psnr_list[x],ssim_list[x])
+    save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="quality")
 
 def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase,base_filename="results"):
     """
     Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt).
-
     Args:
         psnr_list: A list of PSNR values.
         ssim_list: A list of SSIM values.
         tag: The upper bound of the range (exclusive).
         base_filename: The base filename (e.g., "quality").
     """
-    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"  # Create unique filename
+    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"  ## Create unique filename
     try:
         with open(filename, "w") as f:
             for x in range(0, tag - 1):
-                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")  # Write to file
+                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")        ## Write to file
         print(f"Data saved to {filename}")
     except Exception as e:
         print(f"Error saving data: {e}")
-#################################################### UTILITY FUNCTIONS ##############################
+#################################################### UTILITY FUNCTIONS #########################
 def dataset_to_numpy(dataset):
     """ change from loaded dataset to numpy arrays
         Used to change BreastMNIST dataset for SVM analysis
@@ -346,8 +368,7 @@ def get_timestamp():
     ## seconds added to avoid overwriting for short hyperparameter selection runs
     return now.strftime("%Y_%m_%d_at_%H%M%S") #timestamp
 
-
-########################################### GRAPHING, SAVING and ANALYSIS ##############################
+########################################### GRAPHING, SAVING and ANALYSIS #########################
 def graph_and_save(history,summary,parameter,filebase,skip=0):
     """ this version calls the two functions together
        summarize history for accuracy
@@ -365,7 +386,7 @@ def graph_and_save(history,summary,parameter,filebase,skip=0):
                                    parameter,
                                    filebase)
     print("Files saved:",run_summary[0],run_summary[1])
-    return run_summary # [filename_h,filename_s,run_result,parameter] 
+    return run_summary # [filename_h,filename_s,run_result,parameter]
 
 def graph(history,summary,parameter,skip=0):
     """summarize history for accuracy
@@ -376,7 +397,8 @@ def graph(history,summary,parameter,skip=0):
     """
     ## first load the keys supplied as part of history.
     ## used to dynamically set various graph elements
-    keys = list(history.history.keys())
+    keys    = list(history.history.keys())
+    summary = str(summary)
     ## work out if there is a single or double graph lines
     graph_type = "two"
     if len(keys) == 2:
@@ -441,9 +463,9 @@ def graph_compare(file1,file2,type_flag='accuracy',index_limit=-1,skip=-1):
                 data1 = data1.iloc[:index_limit]
                 data2 = data2.iloc[:index_limit]
         if skip > 0:
-                if len(data1) > skip:
-                    data1 = data1.iloc[skip:]
-                    data2 = data2.iloc[skip:]
+            if len(data1) > skip:
+                data1 = data1.iloc[skip:]
+                data2 = data2.iloc[skip:]
         ## define line styles for Model 1 (blue) and Model 2 (green)
         line_styles_model1 = ['solid', 'dashed']  # Model 1 styles
         line_styles_model2 = ['solid', 'dashed']  # Model 2 styles can be different
@@ -482,6 +504,7 @@ def history_to_excel(history,summary,parameter,filebase):
     metrics_df['epoch'] = metrics_df.index + 1
     ## then organise the rest of the dataframe ready for saving
     metrics_df = metrics_df[column_order]
+    print("metrics_df",keys,column_order)
     ## write dataframe to filename formed by appending timestr to filebase
     timestr    = get_timestamp()
     filename_h = filebase+'metrics_'+timestr+'.xlsx'
@@ -492,16 +515,17 @@ def history_to_excel(history,summary,parameter,filebase):
     with open(filename_s, "w") as file:
         file.write(parameter.list_parameters()+summary)
     ## now construct the run result structure with calculated metrics
-    run_result = RunResult(min_loss      = metrics_df[column_order[1]].min(),
-                           max_acc       = metrics_df[column_order[2]].max(),
-                           last_loss     = metrics_df[column_order[1]].iloc[-1],
-                           last_acc      = metrics_df[column_order[2]].iloc[-1],
-                           min_val_loss  = metrics_df[column_order[3]].min(),
-                           max_val_acc   = metrics_df[column_order[4]].max(),
-                           last_val_loss = metrics_df[column_order[3]].iloc[-1],
-                           last_val_acc  = metrics_df[column_order[4]].iloc[-1],
-                           var_loss      = metrics_df[column_order[1]].var(),
-                           var_acc       = metrics_df[column_order[2]].var())
+    run_result = get_run_metrics(metrics_df,
+                                 min_loss=('loss', 'min'),
+                                 max_acc=('acc', 'max'),
+                                 last_loss=('loss', 'last'),
+                                 last_acc=('acc', 'last'),
+                                 min_val_loss=('val_loss', 'min'),
+                                 max_val_acc=('val_acc', 'max'),
+                                 last_val_loss=('val_loss', 'last'),
+                                 last_val_acc=('val_acc', 'last'),
+                                 var_loss=('loss', 'var'),
+                                 var_acc=('acc', 'var'))
     ## added parameter to return results
     return [filename_h,filename_s,run_result,parameter] #filenames
 
@@ -525,28 +549,26 @@ def hyper_process(history,_,parameter):
     ## now construct the run result structure with calculated metric
     if len(column_order) > 2:
         ## val values can be calculated
-        run_result = RunResult(min_loss      = metrics_df[column_order[1]].min(),
-                               max_acc       = metrics_df[column_order[2]].max(),
-                               last_loss     = metrics_df[column_order[1]].iloc[-1],
-                               last_acc      = metrics_df[column_order[2]].iloc[-1],
-                               min_val_loss  = metrics_df[column_order[3]].min(),
-                               max_val_acc   = metrics_df[column_order[4]].max(),
-                               last_val_loss = metrics_df[column_order[3]].iloc[-1],
-                               last_val_acc  = metrics_df[column_order[4]].iloc[-1],
-                               var_loss      = metrics_df[column_order[1]].var(),
-                               var_acc       = metrics_df[column_order[2]].var())
+        run_result = get_run_metrics(metrics_df,
+                                    min_loss=('loss', 'min'),
+                                    max_acc=('acc', 'max'),
+                                    last_loss=('loss', 'last'),
+                                    last_acc=('acc', 'last'),
+                                    min_val_loss=('val_loss', 'min'),
+                                    max_val_acc=('val_acc', 'max'),
+                                    last_val_loss=('val_loss', 'last'),
+                                    last_val_acc=('val_acc', 'last'),
+                                    var_loss=('loss', 'var'),
+                                    var_acc=('acc', 'var'))
     else:
         ## set val values to default
-        run_result = RunResult(min_loss      = metrics_df[column_order[1]].min(),
-                               max_acc       = metrics_df[column_order[2]].max(),
-                               last_loss     = metrics_df[column_order[1]].iloc[-1],
-                               last_acc      = metrics_df[column_order[2]].iloc[-1],
-                               min_val_loss  = 99999,
-                               max_val_acc   = 0,
-                               last_val_loss = 99999,
-                               last_val_acc  = 0,
-                               var_loss      = metrics_df[column_order[1]].var(),
-                               var_acc       = metrics_df[column_order[2]].var())
+        run_result = get_run_metrics(metrics_df,
+                                    min_loss=('loss', 'min'),
+                                    max_acc=('acc', 'max'),
+                                    last_loss=('loss', 'last'),
+                                    last_acc=('acc', 'last'),
+                                    var_loss=('loss', 'var'),
+                                    var_acc=('acc', 'var'))
     ## added parameter to return results
     hyper_history = ["","",run_result,parameter]
     return hyper_history ## ["","",run_result,parameter] to mirror history_to_excel returns
@@ -557,6 +579,7 @@ def analyse_run(run_list,selection,filebase):
     """
     # Extract data into a flat structure
     flat_data = []
+    selection = str(selection)
     for entry in run_list:
         ## need to flatten structure for both runresult and parameter
         metrics_file, summary_file, result,parameter = entry
@@ -585,7 +608,7 @@ def analyse_run(run_list,selection,filebase):
             'layers': parameter.layers,
             'optimise': parameter.optimise,
             'loss': parameter.loss,
-            'default_activation': parameter.default_activation,
+            'activation': parameter.activation,
         })
     # Convert to DataFrame
     run_df = pd.DataFrame(flat_data)
@@ -655,26 +678,27 @@ def process_best_run(best_run):
         if instance in hp_fields:
             print(instance,":",best_run[instance].iloc[0])
     ##should be able t do this costruction of parameter more flexibly
-    parameter = HyperParameters(learning_rate=best_run['learning_rate'].iloc[0], 
-                                batch_size=best_run['batch_size'].iloc[0], 
-                                num_epochs=best_run['num_epochs'].iloc[0], 
+    parameter = HyperParameters(learning_rate=best_run['learning_rate'].iloc[0],
+                                batch_size=best_run['batch_size'].iloc[0],
+                                num_epochs=best_run['num_epochs'].iloc[0],
                                 num_filter=best_run['num_filter'].iloc[0],
                                 layers=best_run['layers'].iloc[0],
                                 dropout_rate=best_run['dropout_rate'].iloc[0],
                                 strides=best_run['strides'].iloc[0],
                                 padding=best_run['padding'].iloc[0],
                                 optimise=best_run['optimise'].iloc[0],
-                                loss=best_run['loss'].iloc[0]) 
+                                loss=best_run['loss'].iloc[0])
     parameter.save_excel("param_"+str(get_timestamp())+".xlsx")
 
 ################################# AMLS2 functions ################################################
 
 class ResizeLayer(Layer):
+    """ resize layer"""
     def __init__(self, target_size, **kwargs):
         super(ResizeLayer, self).__init__(**kwargs)
         self.target_size = target_size
 
-    def call(self, inputs):
+    def call(self, inputs, **kwargs): ## added kwargs
         return tf.image.resize(inputs, self.target_size)
 
 def display_lr_hr_pairs(dataset, num_samples=5):
@@ -685,51 +709,45 @@ def display_lr_hr_pairs(dataset, num_samples=5):
         dataset (tf.data.Dataset): The dataset containing (LR, HR) pairs.
         num_samples (int): Number of pairs to display.
     """
-    # Get a batch of images
+    ## Get a batch of images
     lowres_batch, highres_batch = next(iter(dataset))
-
-    # Convert tensors to NumPy for visualization
+    ## Convert tensors to NumPy for visualization
     lowres_batch = lowres_batch.numpy()
     highres_batch = highres_batch.numpy()
-
     # Plot the images
     plt.figure(figsize=(10, num_samples * 3))
     for i in range(num_samples):
         plt.subplot(num_samples, 2, 2 * i + 1)
-        plt.imshow(lowres_batch[i])  # Show LR image
+        plt.imshow(lowres_batch[i])  ## Show LR image
         plt.axis("off")
         plt.title("Low-Res")
-
         plt.subplot(num_samples, 2, 2 * i + 2)
-        plt.imshow(highres_batch[i])  # Show HR image
+        plt.imshow(highres_batch[i])  ## Show HR image
         plt.axis("off")
         plt.title("High-Res")
-
     plt.show()
 
 #################################################### DATA LOADING ##############################
 
-def load_image_pair(lr_path, hr_path):
+def load_image_pair(lr_path, hr_path, upscale_factor):
     """
     Loads a low-resolution (LR) and high-resolution (HR) image pair as tensors.
+    Now add in explicit upscale factor
     """
-    # Load LR image
+    ## Load LR image
     lr = tf.io.read_file(lr_path)
     lr = tf.image.decode_png(lr, channels=3)
     lr = tf.image.convert_image_dtype(lr, tf.float32)  # Normalize to [0,1]
-
-    # Resize LR image to MobileNet input size
+    ## Resize LR image to MobileNet input size
     lr = tf.image.resize(lr, [IMG_SIZE, IMG_SIZE])
-
-    # Load HR image
+    ## Load HR image
     hr = tf.io.read_file(hr_path)
     hr = tf.image.decode_png(hr, channels=3)
     hr = tf.image.convert_image_dtype(hr, tf.float32)  # Normalize to [0,1]
-    # Do we resize HR image to keep its original resolution for training
-    ##hr = tf.image.resize(hr, [IMG_SIZE, IMG_SIZE])
-    hr = tf.image.resize(hr, [IMG_SIZE * UPSCALE_FACTOR, IMG_SIZE * UPSCALE_FACTOR])  # Resize HR to 4x LR size
-
-    return lr, hr  # Return both as tensors
+    ## Do we resize HR image to keep its original resolution for training
+    ## Resize HR to 4x LR size
+    hr = tf.image.resize(hr, [IMG_SIZE * upscale_factor, IMG_SIZE * upscale_factor])
+    return lr, hr  ## Return both as tensors
 
 #######################################################################################
 def plot_results(lowres, preds):
@@ -737,19 +755,15 @@ def plot_results(lowres, preds):
     Displays low-resolution image and super-resolution image
     """
     plt.figure(figsize=(12, 6))
-
-    # Ensure pixel values are within valid range [0,1]
+    ## Ensure pixel values are within valid range [0,1]
     lowres = np.clip(lowres, 0, 1)
     preds  = np.clip(preds, 0, 1)
-
     plt.subplot(1, 2, 1)
     plt.imshow(lowres)
     plt.title("Low-resolution")
-
     plt.subplot(1, 2, 2)
     plt.imshow(preds)
     plt.title("Prediction (Super-Resolution)")
-
     plt.show()
 
 ## Define perceptual loss outside the training loop
@@ -761,180 +775,384 @@ loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').outpu
 loss_model.trainable = False  # Freeze VGG19 weights
 
 def swish(x):
+    """ swish function
+    """
     return x * tf.keras.activations.sigmoid(x)
 
 def perceptual_loss(y_true, y_pred):
     """
     Calculates the perceptual loss using VGG19 features.
-
     Args:
         y_true: Ground truth high-resolution image.
         y_pred: Predicted high-resolution image.
-
     Returns:
         Perceptual loss value.
     """
-    # Resize y_true and y_pred to (224, 224) before passing to loss_model
+    ## Resize y_true and y_pred to (224, 224) before passing to loss_model
     y_true = tf.image.resize(y_true, (224, 224))
     y_pred = tf.image.resize(y_pred, (224, 224))
-
-    # Calculate perceptual loss using the pre-loaded loss_model
+    ## Calculate perceptual loss using the pre-loaded loss_model
     return tf.reduce_mean(tf.square(loss_model(y_true) - loss_model(y_pred)))
 
-def se_block(input_tensor, ratio=16):
-    """Squeeze-and-Excitation block for feature enhancement."""
-    filters = input_tensor.shape[-1]
-    se = GlobalAveragePooling2D()(input_tensor)
-    se = Dense(filters // ratio, activation="relu")(se)
-    se = Dense(filters, activation="sigmoid")(se)
-    return Multiply()([input_tensor, se])
-
-def residual_block(x):
-    """A small ResNet-like block."""
-    res = Conv2D(64, (3, 3), padding="same")(x)
-    res = BatchNormalization()(res)
-    res = PReLU(shared_axes=[1, 2])(res)
-    res = Conv2D(64, (3, 3), padding="same")(res)
-    res = BatchNormalization()(res)
-    return Add()([x, res])  # Skip connection
-
-def srresnet(num_res_blocks: int = 16):
-    """
-    Creates SRResNet model.
-
+def srresnet(num_res_blocks: int = 16,dropout_rate=0.0):
+    """ Creates SRResNet model - now with added SE blocks
     Parameters
     ----------
-    num_res_blocks: int
-        Number of residual blocks in the model
-        Default=16
-
+    num_res_blocks: int - Number of residual blocks in the model - Default=16
     Returns
     -------
-        SRResNet Model object.
+    SRResNet Model object.
     """
     def PReLU_activation(name):
+        """ PReLU """
         return PReLU(Constant(value=0.25), shared_axes=[1,2], name=name)
 
-    def residual_block(layer_input, filters, block_number):
+    def se_block(input_tensor, ratio=16):
+        """Squeeze-and-Excitation block for feature enhancement."""
+        filters = input_tensor.shape[-1]
+        se = GlobalAveragePooling2D()(input_tensor)
+        se = Dense(filters // ratio, activation="relu")(se)
+        se = Dense(filters, activation="sigmoid")(se)
+        return Multiply()([input_tensor, se])
+
+    def residual_srresnet_block(layer_input, filters, block_number,dropout_rate=0.0):
         """Residual block described in paper"""
-        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_1")(layer_input)
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same',\
+                   name=f"conv_res_{block_number}_1")(layer_input)
         d = PReLU_activation(f"prelu_res_{block_number}")(d)
         d = BatchNormalization(momentum=0.8, name=f"BN_res_{block_number}_1")(d)
-        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_2")(d)
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same',\
+                   name=f"conv_res_{block_number}_2")(d)
         d = BatchNormalization(momentum=0.8, name=f"BN_res_{block_number}_2")(d)
+        if dropout_rate > 0.0:
+            d = Dropout(dropout_rate)(d)
+        # Add SE block here
+        d = se_block(d)
         d = Add(name=f"add_res_{block_number}")([d, layer_input])
         return d
 
     def upsample_block(layer_input, scale, i):
-      """
-      """
-      u = Conv2D(256, kernel_size=3, strides=1, padding='same', name=f"conv_up_{i}")(layer_input)
-      # Wrap depth_to_space in a Lambda layer
-      u = Lambda(lambda x: depth_to_space(x, 2), name=f"pix_shuf_{i}")(u)
-      return PReLU_activation(name=f"prelu_up_{i}")(u)
+        """ upsample block
+        """
+        u = Conv2D(256, kernel_size=3, strides=1, padding='same',\
+                   name=f"conv_up_{i}")(layer_input)
+        # Wrap depth_to_space in a Lambda layer and added scale parameter rather than 2
+        u = Lambda(lambda x: depth_to_space(x, scale), name=f"pix_shuf_{i}")(u)
+        return PReLU_activation(name=f"prelu_up_{i}")(u)
 
-    # ==================
-    # Model Construction
-    # ==================
-
+    ## Model Construction
     lr_image = Input(shape=(None, None, 3))
-    c1 = Conv2D(64, kernel_size=9, strides=1, padding='same', name="Conv_ip")(lr_image)
+    c1 = Conv2D(64, kernel_size=9, strides=1, padding='same',\
+                name="Conv_ip")(lr_image)
     c1 = PReLU_activation(name="prelu_ip")(c1)
-
-    r = residual_block(c1, 64, 0)
+    r  = residual_srresnet_block(c1, 64, 0)
     for i in range(1,num_res_blocks):
-      r = residual_block(r, 64, i)
-
-    c2 = Conv2D(64, kernel_size=3, strides=1, padding='same', name="conv_out")(r)
+        r = residual_srresnet_block(r, 64, i)
+    c2 = Conv2D(64, kernel_size=3, strides=1, padding='same',\
+                name="conv_out")(r)
     c2 = BatchNormalization(momentum=0.8, name="BN_out")(c2)
     c2 = Add(name="add_out")([c2, c1])
-
     u1 = upsample_block(c2, 2, 1)
     u2 = upsample_block(u1, 2, 2)
-
-    c3 = Conv2D(3, kernel_size=9, strides=1, padding='same', activation="sigmoid", name="conv_final")(u2)
-
+    c3 = Conv2D(3, kernel_size=9, strides=1, padding='same',\
+                activation="sigmoid", name="conv_final")(u2)
     return Model(lr_image, c3, name="SRResNet")
 
-def edsr(num_filters: int = 64, num_res_blocks: int = 16):
-    """
-    Creates an EDSR model.
+def residual_in_residual_dense_block(layer_input, filters, block_number, kernel_size, padding):
+    d = layer_input
+    for i in range(3):
+        d = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"rrdb_{block_number}_{i}")(d)
+        d = Add()([d, layer_input])
+    return d
 
+def srresnet_plus(item):
+    """ Creates SRResNet model with SE blocks and enhanced tunability
     Parameters
     ----------
-    num_filters: int
-        Number of filters per convolution layer.
-        Default=64
-
-    num_res_blocks: int
-        Number of residual blocks in the model
-        Default=16
-
+        item: Hyperparameters        
     Returns
     -------
-        EDSR Model object.
+        SRResNet Model object.
     """
-    DIV2K_RGB_MEAN = np.array([0.4488, 0.4371, 0.4040]) * 255
-    normalize = lambda x: (x - DIV2K_RGB_MEAN) / 127.5
-    denormalize = lambda x: x * 127.5 + DIV2K_RGB_MEAN
-    pixel_shuffle = lambda x: depth_to_space(x, 2)
+    from tensorflow.keras import layers
+    ## initialise parameters
+    ## model parameters
+    activation               = str(item.activation)
+    loss                     = str(item.loss)
+    optimizer_choice         = str(item.optimise)
+    learning_rate            = float(item.learning_rate)
+    ## CNN defaults
+    padding                  = str(item.padding)
+    strides                  = int(item.strides)
+    ## width of CNN
+    num_filter               = int(item.num_filter)               
+    ## Number of residual blocks in the model - depth of CNN
+    num_layers               = int(item.layers)                   
+    kernel_size              = int(item.kernel_size)
+    ## Upscaling factor e.g. 2,4
+    scale                    = int(item.scale) 
+    ## Parameters for batch normalization                   
+    momentum                 = float(item.momentum)
+    epsilon                  = float(item.epsilon)
+    lr_image                 = Input(shape=(None, None, 3))
+    ## parameter not currently used but available
+    ##   dropout_rate = float(item.dropout_rate)
 
-    def residual_block(layer_input, filters, block_number):
-        """Residual block described in paper"""
-        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', activation='relu', name=f"conv_res_{block_number}_1")(layer_input)
-        d = Conv2D(filters, kernel_size=3, strides=1, padding='same', name=f"conv_res_{block_number}_2")(d)
+    def activation_layer(activation,name):
+        """ activation layer with activation and name parameters"""
+        if activation == 'relu':
+            return layers.ReLU(name=name)
+        if activation == 'leakyrelu':
+            return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'prelu':
+            return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
+
+    def se_block(input_tensor, ratio=16):
+        """Squeeze-and-Excitation block for feature enhancement """
+        filters = input_tensor.shape[-1]
+        se = GlobalAveragePooling2D()(input_tensor)
+        se = Dense(filters // ratio, activation="relu")(se)
+        se = Dense(filters, activation="sigmoid")(se)
+        return Multiply()([input_tensor, se])
+
+    def residual_srresnet_block(layer_input, filters, block_number):
+        """Residual block described in Lim et al [ ]"""
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_res_{block_number}_1")(layer_input)
+        d = BatchNormalization(momentum=momentum, epsilon=epsilon,\
+                               name=f"BN_res_{block_number}_1")(d)
+        d = activation_layer(activation,f"activation_res_{block_number}_1")(d)
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_res_{block_number}_2")(d)
+        d = BatchNormalization(momentum=momentum, epsilon=epsilon,\
+                               name=f"BN_res_{block_number}_2")(d)
+        ## putting se block here allows feature refinement
+        d = se_block(d)
         d = Add(name=f"add_res_{block_number}")([d, layer_input])
         return d
 
-    def upsample_block(layer_input, i) :
-        u = Conv2D(num_filters*4, kernel_size=3, strides=1, padding='same', name=f"conv_up_{i}")(layer_input)
+    def residual_srresnet_block_new(layer_input, filters, block_number):
+        d = residual_in_residual_dense_block(layer_input, filters, block_number, kernel_size, padding)
+        d = se_block(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(activation,layer_input, scale, i):
+        """ upsample block to increase the spatial resolution (height and width) 
+            of the input feature maps """
+        u = Conv2D(256, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_up_{i}")(layer_input)
+        if scale == 2:  ## can use depth to space efficent process with pixel shuffle
+            u = Lambda(lambda x: depth_to_space(x, scale), name=f"pix_shuf_{i}")(u)
+        else:
+            ## scale other than 2 needs bilinear interpolation
+            u = UpSampling2D(size=(scale, scale), interpolation='bilinear',\
+                             name = f"up_sample_{i}")(u)
+        return activation_layer(activation,name=f"activation_up_{i}")(u)
+
+    ## Model Construction
+    ## kernel size = 9. 128 was 64
+    c1 = Conv2D(128, kernel_size=9, strides=strides, padding=padding, name="Conv_ip")(lr_image)
+    print("activation",activation)
+    c1 = activation_layer(activation,name="activation_ip")(c1)
+    r  = residual_srresnet_block(c1, num_filter, 0)
+    ## use num_layers from item
+    for i in range(1, num_layers):
+        r = residual_srresnet_block(r, num_filter, i)
+    ## 128 was 64
+    c2 = Conv2D(128, kernel_size=kernel_size, strides=strides, padding=padding,\
+                name="conv_out")(r)
+    c2 = BatchNormalization(momentum=momentum, epsilon=epsilon, name="BN_out")(c2)
+    c2 = Add(name="add_out")([c2, c1])
+    u1 = upsample_block(activation,c2, scale, 1)
+    if scale == 4:
+        u2 = upsample_block(activation,u1, 2, 2)
+        u2 = upsample_block(activation,u2, 2, 3)
+    ## 3 to match channels. kernel = 9 
+    c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",\
+                name="conv_final")(u1 if scale == 2 else u2)
+    model = Model(lr_image, c3, name="SRResNet")
+    ## optimizer setting and model compile
+    if optimizer_choice == 'Adam':
+        optimizer = Adam(learning_rate=learning_rate)
+    if optimizer_choice == 'AdamW':
+        optimizer = AdamW(learning_rate=learning_rate)
+    if loss == 'ssim_loss':
+        model.compile(loss=ssim_loss_plus,\
+                      optimizer=optimizer,\
+                      metrics=['acc'])
+    if loss == 'psnr_loss':
+        model.compile(loss=psnr_loss,\
+                      optimizer=optimizer,\
+                      metrics=['acc'])
+    return model
+
+def edsr(num_filters: int = 64, num_res_blocks: int = 16):
+    """ Creates an EDSR model.
+    Parameters
+    ----------
+    num_filters: int          Number of filters per convolution layer     Default=64
+    num_res_blocks: int       Number of residual blocks in the model      Default=16
+    Returns
+    -------
+        EDSR Model object
+    """
+    DIV2K_RGB_MEAN = np.array([0.4488, 0.4371, 0.4040]) * 255
+    normalize      = lambda x: (x - DIV2K_RGB_MEAN) / 127.5
+    denormalize    = lambda x: x * 127.5 + DIV2K_RGB_MEAN
+    pixel_shuffle  = lambda x: depth_to_space(x, 2)
+
+    def residual_edsr_block(layer_input, filters, block_number):
+        """Residual block described in paper"""
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same',\
+                   activation='relu', name=f"conv_res_{block_number}_1")(layer_input)
+        d = Conv2D(filters, kernel_size=3, strides=1, padding='same',\
+                   name=f"conv_res_{block_number}_2")(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(layer_input, i):
+        u = Conv2D(num_filters*4, kernel_size=3, strides=1, padding='same',\
+                   name=f"conv_up_{i}")(layer_input)
         u = Lambda(pixel_shuffle, name=f"pix_shuf_{i}")(u)
         return u
 
-    # ==================
-    # Model Construction
-    # ==================
-
-    x_in = Input(shape=(None, None, 3), name="LR Batch")
-    x = Lambda(normalize, name="normalize_input")(x_in)
-
+    ## Model Construction
+    x_in  = Input(shape=(None, None, 3), name="LR Batch")
+    x     = Lambda(normalize, name="normalize_input")(x_in)
     x = r = Conv2D(num_filters, 3, padding='same', name="Conv_ip")(x)
     for i in range(num_res_blocks):
-        r = residual_block(r, num_filters, i)
+        r = residual_edsr_block(r, num_filters, i)
+    c2    = Conv2D(num_filters, 3, padding='same', name="conv_out")(r)
+    c2    = Add(name="add_out")([x, c2])
+    u1    = upsample_block(c2, 1)
+    u2    = upsample_block(u1, 2)
+    c3    = Conv2D(3, 3, padding='same', name="conv_final")(u2)
+    x_out = Lambda(denormalize, name="denormalize_output")(c3)
+    return Model(x_in, x_out, name="EDSR")
 
-    c2 = Conv2D(num_filters, 3, padding='same', name="conv_out")(r)
-    c2 = Add(name="add_out")([x, c2])
+def edsr_plus(item):
+    """ Creates an EDSR model.
+    Parameters
+    ----------
+        item: Hyperparameters        
+    Returns
+    -------
+        EDSR Model object
+    """
+    DIV2K_RGB_MEAN = np.array([0.4488, 0.4371, 0.4040]) * 255
+    normalize      = lambda x: (x - DIV2K_RGB_MEAN) / 127.5
+    denormalize    = lambda x: x * 127.5 + DIV2K_RGB_MEAN
+    pixel_shuffle  = lambda x: depth_to_space(x, 2)
+    ## initialise parameters
+    ## model parameters
+    activation               = str(item.activation)
+    loss                     = str(item.loss)
+    optimizer_choice         = str(item.optimise)
+    learning_rate            = float(item.learning_rate)
+    ## CNN defaults
+    padding                  = str(item.padding)
+    strides                  = int(item.strides)
+    ## width of CNN
+    num_filters              = int(item.num_filter)               
+    ## Number of residual blocks in the model - depth of CNN
+    num_layers               = int(item.layers)                   
+    kernel_size              = int(item.kernel_size)
+    ## Upscaling factor e.g. 2,4
+    scale                    = int(item.scale) 
+    ## Parameters for batch normalization                   
+    momentum                 = float(item.momentum)
+    epsilon                  = float(item.epsilon)
+    lr_image                 = Input(shape=(None, None, 3))
+    ## parameter not currently used but available
+    ##   dropout_rate = float(item.dropout_rate)
 
-    u1 = upsample_block(c2, 1)
-    u2 = upsample_block(u1, 2)
-    c3 = Conv2D(3, 3, padding='same', name="conv_final")(u2)
+    def residual_edsr_block(layer_input, filters, kernel_size,
+                            strides, padding, block_number):
+        """Residual block described in paper"""
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   activation='relu', name=f"conv_res_{block_number}_1")(layer_input)
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_res_{block_number}_2")(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
 
+    def upsample_block(layer_input, num_filters, kernel_size,
+                       strides, padding, i):
+        u = Conv2D(num_filters*4, kernel_size=kernel_size, strides=strides,\
+                   padding=padding,name=f"conv_up_{i}")(layer_input)
+        u = Lambda(pixel_shuffle, name=f"pix_shuf_{i}")(u)
+        return u
+
+    ## Model Construction
+    x_in  = Input(shape=(None, None, 3), name="LR Batch")
+    x     = Lambda(normalize, name="normalize_input")(x_in)
+    x = r = Conv2D(num_filters, 3, padding=padding, name="Conv_ip")(x)
+    ## number of res blocks
+    for i in range(num_layers):
+        r = residual_edsr_block(r, num_filters,kernel_size,
+                                strides,padding,i)
+    c2    = Conv2D(num_filters, 3, padding=padding, name="conv_out")(r)
+    c2    = Add(name="add_out")([x, c2])
+    u1    = upsample_block(c2,num_filters, kernel_size,
+                           strides, padding, 1)
+    u2    = upsample_block(u1,num_filters, kernel_size,
+                           strides, padding, 2)
+    c3    = Conv2D(3, 3, padding=padding, name="conv_final")(u2)
     x_out = Lambda(denormalize, name="denormalize_output")(c3)
     return Model(x_in, x_out, name="EDSR")
 
 def calculate_psnr(firstImage, secondImage):
-   # Compute the difference between corresponding pixels
-   diff = np.subtract(firstImage, secondImage)
-   # Get the square of the difference
-   squared_diff = np.square(diff)
-
-   # Compute the mean squared error
-   mse = np.mean(squared_diff)
-
-   # Compute the PSNR
-   max_pixel = 255
-   psnr = 20 * np.log10(max_pixel) - 10 * np.log10(mse)
-
-   return psnr
+    """ calculate psnr
+    """
+    # Compute the difference between corresponding pixels
+    diff = np.subtract(firstImage, secondImage)
+    # Get the square of the difference
+    squared_diff = np.square(diff)
+    # Compute the mean squared error
+    mse = np.mean(squared_diff)
+    # Compute the PSNR
+    max_pixel = 255
+    psnr = 20 * np.log10(max_pixel) - 10 * np.log10(mse)
+    return psnr
 
 def ssim_loss(y_true, y_pred):
+    """ ssim loss function
+    """
     return 1 - tf.image.ssim(y_true, y_pred, max_val=1.0)
 
+def ssim_loss_plus(y_true, y_pred):
+    """
+    SSIM loss function
+    """
+    # Convert to float32
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    # Resize images if they have different sizes
+    if y_true.shape[1] != y_pred.shape[1] or y_true.shape[2] != y_pred.shape[2]:
+        # Use tf.keras.layers.Resizing instead of tf.image.resize
+        y_pred = tf.keras.layers.Resizing(
+            height=tf.shape(y_true)[1], width=tf.shape(y_true)[2]
+        )(y_pred)
+    # Calculate SSIM
+    ssim_value = tf.image.ssim(y_true, y_pred, max_val=1.0)
+    # Return SSIM loss
+    return 1 - tf.reduce_mean(ssim_value)
+
 def mse_loss(y_true, y_pred):
+    """ MSE loss function
+    """
     return tf.reduce_mean(tf.square(y_true - y_pred))
 
 def psnr_loss(y_true, y_pred):
+    """ PSNR loss function with normalized return value to improve stability
+    """
     mse = mse_loss(y_true, y_pred)
     max_val = 1.0 ## assumes images are normalized.
     psnr = 10.0 * tf.math.log(tf.square(max_val) / mse) / tf.math.log(10.0)
-    return -psnr ## make it a loss by inverting it.
+    ## Normalize PSNR to [-1, 1]
+    typical_max_psnr = 50.0  ## Adjust this value if needed based on runs
+    normalized_psnr = psnr / typical_max_psnr
+    return -normalized_psnr ## make it a loss by inverting it.
+
+########################## code holding ##########################
