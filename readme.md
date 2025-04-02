@@ -1,4 +1,4 @@
-# **AMLS Assessment:Project Title and Description**
+# **AMLS II Assessment:Single Image Super Resolution Challenge**
 This details the design, development and testing of a machine learning (ML) approach for single-image super-resolution, focusing on the NTIRE 2017 challenge [1] tracks. Utilizing the DIV2K dataset for training, I initially implemented a SRResNet model [7] based on Deep Neural Network (DNN) architectures to upscale low-resolution im-ages to high-resolution counterparts. 
 The methodology encompasses data loading and pre-processing, and a three-part approach of base model, hyperparameter selection and tuned model rigorous training, optimization and testing. Performance was assessed using Peak Signal-to-Noise Ratio (PSNR) and Structural Similarity Index (SSIM) metrics on a validation subset of DIV2K. Results demonstrate the efficacy of the proposed model in enhancing image resolution, demonstrating improvements in image restoration and enhancement. 
 Building off this initial SRResNet model, I also explored other DIV2K datasets and alternative models such as EDSR and drew additional conclusions.
