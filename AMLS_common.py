@@ -8,18 +8,6 @@
 ## Used across both assignment tasks
 ## import common libraries
 ## Revision History
-## 02122024 Tidy functions & comments (including pylint run)
-## 02122024 Split graph and save functions to allow graphing without saving for heavy testing
-## 02122024 Update graph function to allow plot start at skip to ease analysis
-## 07122024 Updated for more stable use of medmnist library and associated functions
-## 09122024 Enhanced dataclass with defaults and list function for saving to file
-## 09122024 Add tqdm custom callback
-## 15122024 Extended HyperParameter
-## 16122024 Again extended HyperParameter e.g. layers, dropout, filter2
-## 16122024 Integrated extended analysis code from Hyper script into library to faciitate sharing
-## 20122024 Extended parameter again
-## 27122024 Comments and modifications for Task B1 CNN Tune
-## 31122024 Extended dataclasses and enhanced hyper analysis in combination with model scripts
 ## 11012025 Added compare graph function and overfitting callback rather than previous manual option
 ## 16032025 Added AMLS2 base functions, plus minor updates to existing functions
 ## 24032025 Played with lpips_loss and updated data loading functions
@@ -27,6 +15,10 @@
 ## 27032025 Integrated srresnet_plus into this file and updated hyperparameters
 ## 29032025 Fixed activation layer parameters in sressnet_plus
 ## 29032025 Added edsr_plus with item parameters
+## 31032025 Added srresnet_plus_2 to overcome Track2 image size issues
+## 01042025 Updated srresnet model naming to have base (base), tune (all hyperparams) and 
+##          plus (RRDB) models for more logical progression
+
 
 #################################################### LIBRARY IMPORTS ##############################
 ## standard python libraries
@@ -43,8 +35,8 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import GlobalAveragePooling2D,Dense,Multiply,Add,Layer,Lambda
 from tensorflow.keras.layers import Input,Conv2D,Dropout,PReLU, BatchNormalization
-from tensorflow.keras.layers import UpSampling2D
-from tensorflow.keras.optimizers import AdamW
+from tensorflow.keras.layers import UpSampling2D, Concatenate
+from tensorflow.keras.optimizers import Adam,AdamW
 ##from tensorflow.keras.losses import BinaryCrossentropy, MeanAbsoluteError
 ##from tensorflow.keras.applications import MobileNetV2
 from tensorflow.keras.initializers import Constant
@@ -75,7 +67,7 @@ class HyperParameters:
     loss: str
     num_filter: int
     strides: int = 1
-    padding: str = "valid"
+    padding: str = "same"
     dropout_rate: float = 0.2
     layers: int = 3
     activation: str = "Prelu"
@@ -180,7 +172,7 @@ def get_run_metrics(df, **metric_operations):
     return RunResult(**results) ## dict
 
 class TqdmEpochProgress(tf.keras.callbacks.Callback):
-    """ simple progress bar
+    """ simple bar to show progress during model execution
     """
     def __init__(self, total_epochs):
         super().__init__()
@@ -238,12 +230,15 @@ class StopOverfittingCallback(tf.keras.callbacks.Callback):
 
 def load_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder,
               batch_size,upscale_factor):
-    """ load data
+    """ loading all the images from local copies of the Training and Validation datasets 
+        tests applied to confirm there is a complete set and they are a common size
+        HR and LR images which when loaded are linked in pairs 
+        Each dataset is stored in tensors to support the various ML models
     """
     ## Get sorted lists of training image paths
     lr_train_paths = sorted(tf.io.gfile.glob(lr_train_folder + "/*.png"))
     hr_train_paths = sorted(tf.io.gfile.glob(hr_train_folder + "/*.png"))
-    print("Training image paths",len(lr_train_paths),len(hr_train_paths))
+    ## print("Training image paths",len(lr_train_paths),len(hr_train_paths))
     assert len(lr_train_paths) == len(hr_train_paths),"Mismatch between LR and HR train paths!"
     ## Create TensorFlow dataset of paths
     lr_dataset = tf.data.Dataset.from_tensor_slices(lr_train_paths)
@@ -258,7 +253,7 @@ def load_data(lr_train_folder,hr_train_folder,lr_val_folder,hr_val_folder,
     ## Get sorted lists of validation image paths
     lr_val_paths = sorted(tf.io.gfile.glob(lr_val_folder + "/*.png"))
     hr_val_paths = sorted(tf.io.gfile.glob(hr_val_folder + "/*.png"))
-    print("Validation image paths",len(lr_val_paths),len(hr_val_paths))
+    ## print("Validation image paths",len(lr_val_paths),len(hr_val_paths))
     assert len(lr_val_paths) == len(hr_val_paths), "Mismatch between LR and HR validation paths!"
     ## Create TensorFlow dataset of paths
     lr_dataset = tf.data.Dataset.from_tensor_slices(lr_val_paths)
@@ -285,8 +280,8 @@ def test_model(val_dataset,model,batch_size,filebase):
     psnr_list = []
     ssim_list = []
     ## Take min of batch_size or 4 images from validation dataset
-    if batch_size < 4:
-        testing_set = 4
+    if batch_size < 10:
+        testing_set = 10
     else:
         testing_set = batch_size
     for lowres, highres in val_dataset.take(testing_set):
@@ -321,7 +316,7 @@ def test_model(val_dataset,model,batch_size,filebase):
         tag = tag+1
     save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="quality")
 
-def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase,base_filename="results"):
+def save_psnr_ssim_data_old(psnr_list, ssim_list, tag, filebase, base_filename="results"):
     """
     Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt).
     Args:
@@ -336,6 +331,41 @@ def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase,base_filename="resul
             for x in range(0, tag - 1):
                 f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")        ## Write to file
         print(f"Data saved to {filename}")
+    except Exception as e:
+        print(f"Error saving data: {e}")
+
+def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="results"):
+    """
+    Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt) and creates a summary file.
+
+    Args:
+        psnr_list: A list of PSNR values.
+        ssim_list: A list of SSIM values.
+        tag: The upper bound of the range (exclusive).
+        filebase: a string to prepend to the filename
+        base_filename: The base filename (e.g., "quality").
+    """
+    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"
+    summary_filename = f"{filebase+base_filename}_summary_{str(get_timestamp())}.txt" #create a summary filename.
+
+    try:
+        with open(filename, "w") as f:
+            for x in range(0, tag - 1):
+                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")
+        print(f"Data saved to {filename}")
+
+        ##Neil Create summary file
+        with open(summary_filename, "w") as f_summary:
+            f_summary.write("PSNR Summary:\n")
+            f_summary.write(f"  Min: {min(psnr_list[:tag-1])}\n")
+            f_summary.write(f"  Mean: {np.mean(psnr_list[:tag-1])}\n")
+            f_summary.write(f"  Max: {max(psnr_list[:tag-1])}\n")
+            f_summary.write("SSIM Summary:\n")
+            f_summary.write(f"  Min: {min(ssim_list[:tag-1])}\n")
+            f_summary.write(f"  Mean: {np.mean(ssim_list[:tag-1])}\n")
+            f_summary.write(f"  Max: {max(ssim_list[:tag-1])}\n")
+        print(f"Summary saved to {summary_filename}")
+
     except Exception as e:
         print(f"Error saving data: {e}")
 #################################################### UTILITY FUNCTIONS #########################
@@ -388,56 +418,45 @@ def graph_and_save(history,summary,parameter,filebase,skip=0):
     print("Files saved:",run_summary[0],run_summary[1])
     return run_summary # [filename_h,filename_s,run_result,parameter]
 
-def graph(history,summary,parameter,skip=0):
+def graph(history, summary, parameter, skip=0):
     """summarize history for accuracy
-       history is full history of metrics for all epochs
-       summary is model summary (not used, but passed for consistency)
-       parameter is hyperparameter store
-       skip allows later start point for graphs (default is 0).
+        history is full history of metrics for all epochs
+        summary is model summary (not used, but passed for consistency)
+        parameter is hyperparameter store
+        skip allows later start point for graphs (default is 0).
     """
-    ## first load the keys supplied as part of history.
-    ## used to dynamically set various graph elements
     keys    = list(history.history.keys())
     summary = str(summary)
-    ## work out if there is a single or double graph lines
     graph_type = "two"
     if len(keys) == 2:
-        graph_type = "obe"
-    ## set the epochs range for use in plot
-    epochs = range(1,len(history.history['loss'])+1)
-    ## initalise the plot size
+        graph_type = "one"
+    epochs = range(1, len(history.history['loss']) + 1)
     plt.figure(figsize=(12, 5))
-    ## set up the first subplot
+    ## Accuracy Plot
     plt.subplot(1, 2, 1)
-    ## set the first line based on the specific accuracy key supplied
-    plt.plot(epochs[skip:],history.history[keys[1]][skip:])
+    plt.plot(epochs[skip:], history.history[keys[1]][skip:])  ## Loss
     if graph_type == "two":
-        plt.plot(epochs[skip:],history.history[keys[3]][skip:])
-    plt.title('model accuracy [lr='+str(parameter.learning_rate)+']')
-    plt.ylabel('accuracy')
-    plt.xlabel('epoch')
-    ## set the legend depending on whether the graph has one or two lines
-    if graph_type == "two":
-        plt.legend(['train','val'], loc='upper left')
-    else:
-        plt.legend(['train'], loc='upper left')
-    ## now set up the second subplot alongside the first
-    plt.subplot(1, 2, 2)
-    ## summarize history for loss based on supplid loss key
-    plt.plot(epochs[skip:],history.history[keys[0]][skip:])
-    ## set the legend depending on whether the graph has one or two lines
-    if graph_type == "two":
-        plt.plot(epochs[skip:],history.history[keys[2]][skip:])
-    plt.title('model loss [lr='+str(parameter.learning_rate)+']')
-    plt.ylabel(keys[0])
+        plt.plot(epochs[skip:], history.history[keys[3]][skip:])  ## Validation loss
+    plt.title('model loss [lr=' + str(parameter.learning_rate) + ']')  ## Correct title
+    plt.ylabel('loss')
     plt.xlabel('epoch')
     if graph_type == "two":
-        plt.legend(['train','val'], loc='upper right')
+        plt.legend(['train', 'val'], loc='upper right')
     else:
         plt.legend(['train'], loc='upper right')
+    ## Loss Plot
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs[skip:], history.history[keys[0]][skip:])  ## Accuracy
+    if graph_type == "two":
+        plt.plot(epochs[skip:], history.history[keys[2]][skip:])  ## Validation accuracy
+    plt.title('model accuracy [lr=' + str(parameter.learning_rate) + ']')  ## Correct title
+    plt.ylabel('accuracy')  
+    plt.xlabel('epoch')
+    if graph_type == "two":
+        plt.legend(['train', 'val'], loc='lower right')
+    else:
+        plt.legend(['train'], loc='lower right')
     plt.show()
-    ###print("for model\n",str(summary))
-    ## no return
 
 def graph_compare(file1,file2,type_flag='accuracy',index_limit=-1,skip=-1):
     """ allows display of two model runs from metrics files on a single plot
@@ -794,7 +813,7 @@ def perceptual_loss(y_true, y_pred):
     ## Calculate perceptual loss using the pre-loaded loss_model
     return tf.reduce_mean(tf.square(loss_model(y_true) - loss_model(y_pred)))
 
-def srresnet(num_res_blocks: int = 16,dropout_rate=0.0):
+def srresnet_base(num_res_blocks: int = 16,dropout_rate=0.0):
     """ Creates SRResNet model - now with added SE blocks
     Parameters
     ----------
@@ -865,7 +884,24 @@ def residual_in_residual_dense_block(layer_input, filters, block_number, kernel_
         d = Add()([d, layer_input])
     return d
 
-def srresnet_plus(item):
+def rrdb_block(layer_input, filters, block_number, kernel_size, padding):
+    """Conceptual RRDB block."""
+    d = layer_input
+    dense_layers = []  ## Store outputs of dense layers
+    for i in range(3): ## Multiple dense layers
+        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"RRDB_conv_{block_number}_{i}")(d)
+        dense_layers.append(d_temp)
+        d = Concatenate()([d, d_temp])  ## Concatenate features
+    d = Conv2D(filters, kernel_size=1, padding='same', name=f"RRDB_conv_out_{block_number}")(d)  # Output convolution
+    d = Add()([layer_input, d])  ## Short residual connection
+    ## Residual-in-Residual
+    d_outer = d
+    for i in range(2): # multiple residual blocks inside the RRDB
+        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"RRDB_inner_conv_{block_number}_{i}")(d_outer)
+        d_outer = Add()([d_outer,d_temp])
+    return d_outer
+
+def srresnet_tune(item):
     """ Creates SRResNet model with SE blocks and enhanced tunability
     Parameters
     ----------
@@ -971,6 +1007,211 @@ def srresnet_plus(item):
     ## 3 to match channels. kernel = 9 
     c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",\
                 name="conv_final")(u1 if scale == 2 else u2)
+    model = Model(lr_image, c3, name="SRResNet")
+    ## optimizer setting and model compile
+    if optimizer_choice == 'Adam':
+        optimizer = Adam(learning_rate=learning_rate)
+    if optimizer_choice == 'AdamW':
+        optimizer = AdamW(learning_rate=learning_rate)
+    if loss == 'ssim_loss':
+        model.compile(loss=ssim_loss_plus,\
+                      optimizer=optimizer,\
+                      metrics=['acc'])
+    if loss == 'psnr_loss':
+        model.compile(loss=psnr_loss,\
+                      optimizer=optimizer,\
+                      metrics=['acc'])
+    return model
+
+def srresnet_plus(item):
+    """Creates SRResNet model with RRDB blocks and enhanced tunability."""
+    ## initialise parameters
+    ## model parameters
+    activation               = str(item.activation)
+    loss                     = str(item.loss)
+    optimizer_choice         = str(item.optimise)
+    learning_rate            = float(item.learning_rate)
+    ## CNN defaults
+    padding                  = str(item.padding)
+    strides                  = int(item.strides)
+    ## width of CNN
+    num_filter               = int(item.num_filter)               
+    ## Number of residual blocks in the model - depth of CNN
+    num_layers               = int(item.layers)                   
+    kernel_size              = int(item.kernel_size)
+    ## Upscaling factor e.g. 2,4
+    scale                    = int(item.scale) 
+    ## Parameters for batch normalization                   
+    momentum                 = float(item.momentum)
+    epsilon                  = float(item.epsilon)
+    lr_image                 = Input(shape=(None, None, 3))
+    ## parameter not currently used but available
+    ##   dropout_rate = float(item.dropout_rate)
+
+    def activation_layer(activation, name):
+        if activation == 'relu':
+            return layers.ReLU(name=name)
+        if activation == 'leakyrelu':
+            return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'prelu':
+            return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
+
+    def se_block(input_tensor, ratio=16):
+        filters = input_tensor.shape[-1]
+        se = GlobalAveragePooling2D()(input_tensor)
+        se = Dense(filters // ratio, activation="relu")(se)
+        se = Dense(filters, activation="sigmoid")(se)
+        return Multiply()([input_tensor, se])
+
+    def residual_srresnet_block(layer_input, filters, block_number):
+        d = rrdb_block(layer_input, filters, block_number, kernel_size, padding)
+        d = se_block(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(activation, layer_input, scale, i):
+        u = Conv2D(256, kernel_size=kernel_size, strides=strides, padding=padding, name=f"conv_up_{i}")(layer_input)
+        if scale == 2:
+            u = Lambda(lambda x: tf.nn.depth_to_space(x, scale), name=f"pix_shuf_{i}")(u)
+        else:
+            u = UpSampling2D(size=(scale, scale), interpolation='bilinear', name=f"up_sample_{i}")(u)
+        return activation_layer(activation, name=f"activation_up_{i}")(u)
+
+    c1 = Conv2D(128, kernel_size=9, strides=strides, padding=padding, name="Conv_ip")(lr_image)
+    c1 = activation_layer(activation, name="activation_ip")(c1)
+    r  = residual_srresnet_block(c1, num_filter, 0)
+
+    for i in range(1, num_layers):
+        r = residual_srresnet_block(r, num_filter, i)
+
+    c2 = Conv2D(128, kernel_size=kernel_size, strides=strides, padding=padding, name="conv_out")(r)
+    c2 = BatchNormalization(momentum=momentum, epsilon=epsilon, name="BN_out")(c2)
+    c2 = Add(name="add_out")([c2, c1])
+    u1 = upsample_block(activation, c2, scale, 1)
+
+    if scale == 4:
+        u2 = upsample_block(activation, u1, 2, 2)
+        u2 = upsample_block(activation, u2, 2, 3)
+
+    c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid", name="conv_final")(u1 if scale == 2 else u2)
+    model = Model(lr_image, c3, name="SRResNet")
+
+    if optimizer_choice == 'Adam':
+        optimizer = Adam(learning_rate=learning_rate)
+    if optimizer_choice == 'AdamW':
+        optimizer = AdamW(learning_rate=learning_rate)
+    if loss == 'ssim_loss':
+        model.compile(loss=ssim_loss_plus, optimizer=optimizer, metrics=['acc'])
+    if loss == 'psnr_loss':
+        model.compile(loss=psnr_loss, optimizer=optimizer, metrics=['acc'])
+    return model
+
+def srresnet_tune_2(item):
+    """ Creates SRResNet model with SE blocks and enhanced tunability
+    Parameters
+    ----------
+        item: Hyperparameters        
+    Returns
+    -------
+        SRResNet Model object.
+    """
+    from tensorflow.keras import layers
+    ## initialise parameters
+    ## model parameters
+    activation               = str(item.activation)
+    loss                     = str(item.loss)
+    optimizer_choice         = str(item.optimise)
+    learning_rate            = float(item.learning_rate)
+    ## CNN defaults
+    padding                  = str(item.padding)
+    strides                  = int(item.strides)
+    ## width of CNN
+    num_filter               = int(item.num_filter)               
+    ## Number of residual blocks in the model - depth of CNN
+    num_layers               = int(item.layers)                   
+    kernel_size              = int(item.kernel_size)
+    ## Upscaling factor e.g. 2,4
+    scale                    = int(item.scale) 
+    ## Parameters for batch normalization                   
+    momentum                 = float(item.momentum)
+    epsilon                  = float(item.epsilon)
+    lr_image                 = Input(shape=(None, None, 3))
+    ## parameter not currently used but available
+    ##   dropout_rate = float(item.dropout_rate)
+
+    def activation_layer(activation,name):
+        """ activation layer with activation and name parameters"""
+        if activation == 'relu':
+            return layers.ReLU(name=name)
+        if activation == 'leakyrelu':
+            return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'prelu':
+            return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
+
+    def se_block(input_tensor, ratio=16):
+        """Squeeze-and-Excitation block for feature enhancement """
+        filters = input_tensor.shape[-1]
+        se = GlobalAveragePooling2D()(input_tensor)
+        se = Dense(filters // ratio, activation="relu")(se)
+        se = Dense(filters, activation="sigmoid")(se)
+        return Multiply()([input_tensor, se])
+
+    def residual_srresnet_block(layer_input, filters, block_number):
+        """Residual block described in Lim et al [ ]"""
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_res_{block_number}_1")(layer_input)
+        d = BatchNormalization(momentum=momentum, epsilon=epsilon,\
+                               name=f"BN_res_{block_number}_1")(d)
+        d = activation_layer(activation,f"activation_res_{block_number}_1")(d)
+        d = Conv2D(filters, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_res_{block_number}_2")(d)
+        d = BatchNormalization(momentum=momentum, epsilon=epsilon,\
+                               name=f"BN_res_{block_number}_2")(d)
+        ## putting se block here allows feature refinement
+        d = se_block(d)
+        d = Add(name=f"add_res_{block_number}")([d, layer_input])
+        return d
+
+    def upsample_block(activation,layer_input, scale, i):
+        """ upsample block to increase the spatial resolution (height and width) 
+            of the input feature maps """
+        u = Conv2D(256, kernel_size=kernel_size, strides=strides, padding=padding,\
+                   name=f"conv_up_{i}")(layer_input)
+        if scale == 2:  ## can use depth to space efficent process with pixel shuffle
+            u = Lambda(lambda x: depth_to_space(x, scale), name=f"pix_shuf_{i}")(u)
+        else:
+            ## scale other than 2 needs bilinear interpolation
+            u = UpSampling2D(size=(scale, scale), interpolation='bilinear',\
+                             name = f"up_sample_{i}")(u)
+        return activation_layer(activation,name=f"activation_up_{i}")(u)
+
+    ## Model Construction
+    ## kernel size = 9. 128 was 64
+    c1 = Conv2D(128, kernel_size=9, strides=strides, padding=padding, name="Conv_ip")(lr_image)
+    print("activation",activation)
+    c1 = activation_layer(activation,name="activation_ip")(c1)
+    r  = residual_srresnet_block(c1, num_filter, 0)
+    ## use num_layers from item
+    for i in range(1, num_layers):
+        r = residual_srresnet_block(r, num_filter, i)
+    ## 128 was 64
+    c2 = Conv2D(128, kernel_size=kernel_size, strides=strides, padding=padding,
+                name="conv_out")(r)
+    c2 = BatchNormalization(momentum=momentum, epsilon=epsilon, name="BN_out")(c2)
+    c2 = Add(name="add_out")([c2, c1])
+
+    # Upsampling (adjust based on your desired scale factor and output size)
+    # u1 = upsample_block(activation, c2, scale, 1)  # Original upsampling call
+    # if scale == 4:  
+    #     u2 = upsample_block(activation, u1, 2, 2)
+    #     u2 = upsample_block(activation, u2, 2, 3)
+        
+    # Instead of the above, or after the above, add resizing:
+    upscaled_output = layers.Resizing(448, 448)(c2)  # Resize to 448x448
+
+    ## 3 to match channels. kernel = 9 
+    c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",
+                name="conv_final")(upscaled_output)  # Use resized output
     model = Model(lr_image, c3, name="SRResNet")
     ## optimizer setting and model compile
     if optimizer_choice == 'Adam':
@@ -1102,23 +1343,35 @@ def edsr_plus(item):
     x_out = Lambda(denormalize, name="denormalize_output")(c3)
     return Model(x_in, x_out, name="EDSR")
 
-def calculate_psnr(firstImage, secondImage):
-    """ calculate psnr
+def calculate_psnr(firstImage, secondImage, max_pixel=255.0):
+    """Calculate PSNR (Peak Signal-to-Noise Ratio).
+    Args:
+        firstImage: The first image (NumPy array).
+        secondImage: The second image (NumPy array).
+        max_pixel: The maximum possible pixel value. Defaults to 255.0.
+    Returns:
+        The PSNR value.
     """
-    # Compute the difference between corresponding pixels
-    diff = np.subtract(firstImage, secondImage)
-    # Get the square of the difference
-    squared_diff = np.square(diff)
-    # Compute the mean squared error
-    mse = np.mean(squared_diff)
-    # Compute the PSNR
-    max_pixel = 255
+    # Ensure images are the same shape
+    if firstImage.shape != secondImage.shape:
+        raise ValueError("Images must have the same dimensions.")
+    ## Convert images to float64 for accurate calculations
+    firstImage = firstImage.astype(np.float64)
+    secondImage = secondImage.astype(np.float64)
+    ## Compute the mean squared error (MSE)
+    mse = np.mean((firstImage - secondImage) ** 2)
+    ## Handle the case where MSE is zero (perfect match)
+    if mse == 0:
+        return float('inf')  ## PSNR is infinite for perfect match
+    ## Calculate PSNR
     psnr = 20 * np.log10(max_pixel) - 10 * np.log10(mse)
     return psnr
 
 def ssim_loss(y_true, y_pred):
     """ ssim loss function
     """
+    ##print("Shape of y_true:", tf.shape(y_true))  # Print shape of ground truth
+    ##print("Shape of y_pred:", tf.shape(y_pred))  # Print shape of prediction
     return 1 - tf.image.ssim(y_true, y_pred, max_val=1.0)
 
 def ssim_loss_plus(y_true, y_pred):
