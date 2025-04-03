@@ -77,7 +77,8 @@ _Data Classes_
 -	RunResult: to allow storage and passing of summary model run results
 
 _Data Load_
-There are two datasets used, one per Task. 
+There are two datasets that need to be loaded per model, one High Resolution and one Low Resolution. 
+These are specified by folder names in the dataset folder tree.
 
 _Models_
 -	SRResNet Base: This is the base model used to generate initial results using the Base scripts. It is fully functional but has a number of hyperparameters defaulted so is less flexible.
