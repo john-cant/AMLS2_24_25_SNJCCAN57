@@ -41,6 +41,8 @@ The scripts will output a number of files to store results and allow easy passin
 - time
 - datetime         
 - numpy
+- glob
+- sys
 - matplotlib.pyplot
 - tensorflow
 - tensorflow.keras.models 
@@ -55,6 +57,8 @@ The scripts will output a number of files to store results and allow easy passin
 - sklearn.metrics
 - sklearn.ensemble
 - sklearn.svm
+- skimage.metrics
+- google.colab
 - nbconvert
 
 ## **Function details within AMLS Common**
