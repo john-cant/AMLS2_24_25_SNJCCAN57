@@ -6,10 +6,13 @@ Building off this initial SRResNet model, I also explored other DIV2K datasets a
 The key scripts to run the various hyperparameter selections, training and testing were implemented in Jupyter notebooks running on a specific Anaconda configured environment. These reference both external and locally developed Python library - AMLS_common.py – the later to reduce the need for duplicated code and to improve the relevance, efficiency and readability of the scripts.
 
 ## **Installation Instructions:**
-This project is intended to be easy to run and need the minimum of installation. The files can be run from a copy of the GitHub structure.
-All the Python packages required are listed in the Packages Required section below. There is a single main.py file that will run the main scripts.
-In addition a copy of a local code library, - developed for these specific task - called AMLS_common.py needs to be included in the base folder.
-Each folder should have a metrics folder which will be used to store results files of various types. If this does not exist then main will create it.
+This project is intended to be easy to run and need the minimum of installation. The files can be run from a copy of the GitHub structure in a Google Colab.
+All the Python packages required are listed in the Packages Required section below with most already being in a standard Google Colab environment.
+The assumption is that the code, data and results are stored in Google drive with all folders being under a single AMLS2 folder.
+In addition a copy of a local code library, - developed for these specific task - called AMLS_common.py needs to be included in this AMLS2 base folder.
+There should be a metrics folder which will be used to store results files of various types. If this does not exist then main will create it.
+The data is stored in the dataset folder which is also assumed to be immediately under the AMLS2 Google directory
+As mandated by the assignment brief, there is a single main.py file that will run the main scripts.
 
 
 ## **Usage Examples:**
