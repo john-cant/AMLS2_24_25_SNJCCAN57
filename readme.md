@@ -11,21 +11,26 @@ All the Python packages required are listed in the Packages Required section bel
 The assumption is that the code, data and results are stored in Google drive with all folders being under a single AMLS2 folder.
 In addition a copy of a local code library, - developed for these specific task - called AMLS_common.py needs to be included in this AMLS2 base folder.
 There should be a metrics folder which will be used to store results files of various types. If this does not exist then main will create it.
-The data is stored in the dataset folder which is also assumed to be immediately under the AMLS2 Google directory
+The data is stored in the dataset folder which is also assumed to be immediately under the AMLS2 Google directory and is split logically by Track, Train/Validation and resolution
+See the folder variables in the scripts for the specific structure. They are setup in the same way in each script to point to the relevant datasets.
 As mandated by the assignment brief, there is a single main.py file that will run the main scripts.
 
 
 ## **Usage Examples:**
 python main.py 
-Will run the main Tasks Jupyter Notebook files 
+Will run the main Tasks Jupyter Notebook files
+To speed testing, by default each script has now been set to only run 2 epochs in either the input spreadsheet or hyperparameter selection (in notebook)
+Obviously to get realistic results, this epoch count would have to be increased in line with the testing numbers in the project report
 
 
 ## **Features:**
 There are several main scripts/Jupyter notebooks:
-- Task_Base: runs the base SRResNet model
-- Task_Multi: designed for hyperparameter selection
-- Task_Tune: runs a single model with select hyperparameters and produces output using Validation datasets
-- Task_Tune_2: takes the optimised HyperParameters and runs the model against the Track 2 Dataset, outputting results
+- Task_Base: runs the base SRResNet model using hyperparam_base_1.xlsx as input
+- Task_Multi_Hyper: designed for hyperparameter selection
+- Task_Tune: runs a single Tune model with select hyperparameters using hyperparam_tune_1.xlsx as input
+- Task EDSR: runs the base EDSR model using hyperparam_tune_1.xlsx as input
+- Task Plus: runs the SRResNet plus model using hyperparam_base_2.xlsx as input
+- Track2_Tune: takes the optimised HyperParameters and runs the model against the Track 2 Dataset, outputting results
 
 ## **Files Output**
 The scripts will output a number of files to store results and allow easy passing of parameters between scripts. These are:
