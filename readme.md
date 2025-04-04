@@ -17,10 +17,12 @@ As mandated by the assignment brief, there is a single main.py file that will ru
 
 
 ## **Usage Examples:**
-python main.py 
-Will run the main Tasks Jupyter Notebook files
-To speed testing, by default each script has now been set to only run 2 epochs in either the input spreadsheet or hyperparameter selection (in notebook)
-Obviously to get realistic results, this epoch count would have to be increased in line with the testing numbers in the project report
+python main.py:
+Will run the main Tasks Jupyter Notebook files.
+To speed testing, by default each script has now been set to only run 2 epochs in either the input spreadsheet or hyperparameter selection (in notebook).
+This restriction of epochs for these large models - ranging from 20M (SRResNet Tune and EDSR) to 10M trainable parameters (SRResNet Plus with RRDB) - is designed to make basic runability testing pragmatic. 
+Even with this restriction, the main.py takes close to 2 hours to run with an A100 GPU with 40 GB RAM.
+Obviously to get realistic results, this epoch count would have to be increased in line with the testing numbers in the project report.
 
 
 ## **Features:**
