@@ -35,13 +35,16 @@ There are several main scripts/Jupyter notebooks:
 ## **Files Output**
 The scripts will output a number of files to store results and allow easy passing of parameters between scripts. These are:
 
-### Hyper Outputs
-- Run file summary of all the results and values for the hyperparameter sets generated and trained in Hyper
-- Parameter file containing the _best case_ hyperparameter set in format thta can be read in by Tune
+### Executed Notebook Outputs (base folder)
+- for each notebook executed a version will be saved to the base folder so the full process can be viewed as a Jupyter notebook
 
-### Tune Outputs (both have same timestamp)
+### Hyper Outputs (metrics)
+- Run file summary of all the results and values for the hyperparameter sets generated and trained in Hyper
+
+### Tune Outputs (metrics all have timestamps)
 - Metrics spreadsheet containing an epoch by epoch list of outputs from history
 - Summary text file containing the model summary
+- Quality file and summary showing PSNR and SSIM outputs
 
 ## **Packages Required:**
 - io
