@@ -37,6 +37,7 @@ The scripts will output a number of files to store results and allow easy passin
 
 ### Executed Notebook Outputs (base folder)
 - for each notebook executed a version will be saved to the base folder so the full process can be viewed as a Jupyter notebook
+- also parameter file from any multi run which can be used as input hyperparameters to subsequent Tune runs
 
 ### Hyper Outputs (metrics)
 - Run file summary of all the results and values for the hyperparameter sets generated and trained in Hyper
