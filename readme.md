@@ -13,7 +13,7 @@ In addition a copy of a local code library, - developed for these specific task 
 There should be a metrics folder which will be used to store results files of various types. If this does not exist then main will create it.
 The data is stored in the dataset folder which is also assumed to be immediately under the AMLS2 Google directory and is split logically by Track, Train/Validation and resolution
 See the folder variables in the scripts for the specific structure. They are setup in the same way in each script to point to the relevant datasets.
-As mandated by the assignment brief, there is a single main.py file that will run the main scripts.
+As mandated by the assignment brief, there is a single main.py file that will run the main scripts and there is the Colab notebook main.ipynb that runs this main.py in the Colab environment.
 
 
 ## **Usage Examples:**
