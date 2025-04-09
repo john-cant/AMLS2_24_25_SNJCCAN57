@@ -16,8 +16,9 @@
 ## 29032025 Fixed activation layer parameters in sressnet_plus
 ## 29032025 Added edsr_plus with item parameters
 ## 31032025 Added srresnet_plus_2 to overcome Track2 image size issues
-## 01042025 Updated srresnet model naming to have base (base), tune (all hyperparams) and 
+## 01042025 Updated srresnet model naming to have base (base), tune (all hyperparams) and
 ##          plus (RRDB) models for more logical progression
+## 03042025 Updated activation function and improved params in SRResNet Plus
 
 
 #################################################### LIBRARY IMPORTS ##############################
@@ -36,9 +37,12 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import GlobalAveragePooling2D,Dense,Multiply,Add,Layer,Lambda
 from tensorflow.keras.layers import Input,Conv2D,Dropout,PReLU, BatchNormalization
 from tensorflow.keras.layers import UpSampling2D, Concatenate
-from tensorflow.keras.optimizers import Adam,AdamW
-##from tensorflow.keras.losses import BinaryCrossentropy, MeanAbsoluteError
-##from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.optimizers import Adam
+try:
+    from tensorflow.keras.optimizers import AdamW
+except:
+    import tensorflow_addons as tfa
+    from tensorflow_addons.optimizers import AdamW
 from tensorflow.keras.initializers import Constant
 from tensorflow.keras.applications.vgg19 import VGG19
 import tensorflow.keras.backend as K
@@ -325,18 +329,20 @@ def save_psnr_ssim_data_old(psnr_list, ssim_list, tag, filebase, base_filename="
         tag: The upper bound of the range (exclusive).
         base_filename: The base filename (e.g., "quality").
     """
-    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"  ## Create unique filename
+    ## Create unique filename
+    filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"
     try:
         with open(filename, "w") as f:
             for x in range(0, tag - 1):
-                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")        ## Write to file
+                f.write(f"{x} {psnr_list[x]} {ssim_list[x]}\n")  ## Write to file
         print(f"Data saved to {filename}")
     except Exception as e:
         print(f"Error saving data: {e}")
 
 def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="results"):
     """
-    Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt) and creates a summary file.
+    Saves PSNR and SSIM values to a uniquely named file (name_timestamp.txt)
+    and creates a summary file.
 
     Args:
         psnr_list: A list of PSNR values.
@@ -346,7 +352,8 @@ def save_psnr_ssim_data(psnr_list, ssim_list, tag, filebase, base_filename="resu
         base_filename: The base filename (e.g., "quality").
     """
     filename = f"{filebase+base_filename}_{str(get_timestamp())}.txt"
-    summary_filename = f"{filebase+base_filename}_summary_{str(get_timestamp())}.txt" #create a summary filename.
+    ## create a summary filename
+    summary_filename = f"{filebase+base_filename}_summary_{str(get_timestamp())}.txt"
 
     try:
         with open(filename, "w") as f:
@@ -450,7 +457,7 @@ def graph(history, summary, parameter, skip=0):
     if graph_type == "two":
         plt.plot(epochs[skip:], history.history[keys[2]][skip:])  ## Validation accuracy
     plt.title('model accuracy [lr=' + str(parameter.learning_rate) + ']')  ## Correct title
-    plt.ylabel('accuracy')  
+    plt.ylabel('accuracy')
     plt.xlabel('epoch')
     if graph_type == "two":
         plt.legend(['train', 'val'], loc='lower right')
@@ -794,7 +801,7 @@ loss_model = Model(inputs=vgg.input, outputs=vgg.get_layer('block5_conv4').outpu
 loss_model.trainable = False  # Freeze VGG19 weights
 
 def swish(x):
-    """ swish function
+    """ swish activation function
     """
     return x * tf.keras.activations.sigmoid(x)
 
@@ -877,30 +884,6 @@ def srresnet_base(num_res_blocks: int = 16,dropout_rate=0.0):
                 activation="sigmoid", name="conv_final")(u2)
     return Model(lr_image, c3, name="SRResNet")
 
-def residual_in_residual_dense_block(layer_input, filters, block_number, kernel_size, padding):
-    d = layer_input
-    for i in range(3):
-        d = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"rrdb_{block_number}_{i}")(d)
-        d = Add()([d, layer_input])
-    return d
-
-def rrdb_block(layer_input, filters, block_number, kernel_size, padding):
-    """Conceptual RRDB block."""
-    d = layer_input
-    dense_layers = []  ## Store outputs of dense layers
-    for i in range(3): ## Multiple dense layers
-        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"RRDB_conv_{block_number}_{i}")(d)
-        dense_layers.append(d_temp)
-        d = Concatenate()([d, d_temp])  ## Concatenate features
-    d = Conv2D(filters, kernel_size=1, padding='same', name=f"RRDB_conv_out_{block_number}")(d)  # Output convolution
-    d = Add()([layer_input, d])  ## Short residual connection
-    ## Residual-in-Residual
-    d_outer = d
-    for i in range(2): # multiple residual blocks inside the RRDB
-        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation="relu", name=f"RRDB_inner_conv_{block_number}_{i}")(d_outer)
-        d_outer = Add()([d_outer,d_temp])
-    return d_outer
-
 def srresnet_tune(item):
     """ Creates SRResNet model with SE blocks and enhanced tunability
     Parameters
@@ -920,26 +903,28 @@ def srresnet_tune(item):
     ## CNN defaults
     padding                  = str(item.padding)
     strides                  = int(item.strides)
-    ## width of CNN
-    num_filter               = int(item.num_filter)               
-    ## Number of residual blocks in the model - depth of CNN
-    num_layers               = int(item.layers)                   
+    ## width of NN
+    num_filter               = int(item.num_filter)
+    ## Number of residual blocks in the model - depth of NN
+    num_layers               = int(item.layers)
     kernel_size              = int(item.kernel_size)
     ## Upscaling factor e.g. 2,4
-    scale                    = int(item.scale) 
-    ## Parameters for batch normalization                   
+    scale                    = int(item.scale)
+    ## Parameters for batch normalization
     momentum                 = float(item.momentum)
     epsilon                  = float(item.epsilon)
     lr_image                 = Input(shape=(None, None, 3))
     ## parameter not currently used but available
     ##   dropout_rate = float(item.dropout_rate)
 
-    def activation_layer(activation,name):
+    def activation_layer(activation, name):
         """ activation layer with activation and name parameters"""
         if activation == 'relu':
             return layers.ReLU(name=name)
         if activation == 'leakyrelu':
             return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'swish':
+            return swish(name=name)
         if activation == 'prelu':
             return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
 
@@ -963,12 +948,6 @@ def srresnet_tune(item):
         d = BatchNormalization(momentum=momentum, epsilon=epsilon,\
                                name=f"BN_res_{block_number}_2")(d)
         ## putting se block here allows feature refinement
-        d = se_block(d)
-        d = Add(name=f"add_res_{block_number}")([d, layer_input])
-        return d
-
-    def residual_srresnet_block_new(layer_input, filters, block_number):
-        d = residual_in_residual_dense_block(layer_input, filters, block_number, kernel_size, padding)
         d = se_block(d)
         d = Add(name=f"add_res_{block_number}")([d, layer_input])
         return d
@@ -1002,9 +981,9 @@ def srresnet_tune(item):
     c2 = Add(name="add_out")([c2, c1])
     u1 = upsample_block(activation,c2, scale, 1)
     if scale == 4:
-        u2 = upsample_block(activation,u1, 2, 2)
-        u2 = upsample_block(activation,u2, 2, 3)
-    ## 3 to match channels. kernel = 9 
+        u2 = upsample_block(activation, u1, 2, 2)
+        u2 = upsample_block(activation, u2, 2, 3)
+    ## 3 to match channels. kernel = 9
     c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",\
                 name="conv_final")(u1 if scale == 2 else u2)
     model = Model(lr_image, c3, name="SRResNet")
@@ -1023,8 +1002,32 @@ def srresnet_tune(item):
                       metrics=['acc'])
     return model
 
+def rrdb_block(layer_input, filters, block_number, kernel_size, padding, activation='relu'):
+    """ RRDB block.
+        Added default activation parameter so it can be varied as required but stays relu if not
+    """
+    d = layer_input
+    dense_layers = []  ## Store outputs of dense layers
+    for i in range(3): ## Multiple dense layers
+        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation=activation,\
+                        name=f"RRDB_conv_{block_number}_{i}")(d)
+        dense_layers.append(d_temp)
+        d = Concatenate()([d, d_temp])  ## Concatenate features
+    ## Output convolution - updated padding to equal supplied parameter
+    d = Conv2D(filters, kernel_size=1, padding=padding, name=f"RRDB_conv_out_{block_number}")(d)
+    d = Add()([layer_input, d])  ## Short residual connection
+    ## Residual-in-Residual
+    d_outer = d
+    for i in range(2): # multiple residual blocks inside the RRDB
+        d_temp = Conv2D(filters, kernel_size=kernel_size, padding=padding, activation=activation,\
+                        name=f"RRDB_inner_conv_{block_number}_{i}")(d_outer)
+        d_outer = Add()([d_outer,d_temp])
+    return d_outer
+
 def srresnet_plus(item):
-    """Creates SRResNet model with RRDB blocks and enhanced tunability."""
+    """Creates SRResNet model with RRDB blocks and enhanced tunability.
+       Now with se block ratio set locally
+    """
     ## initialise parameters
     ## model parameters
     activation               = str(item.activation)
@@ -1034,68 +1037,80 @@ def srresnet_plus(item):
     ## CNN defaults
     padding                  = str(item.padding)
     strides                  = int(item.strides)
-    ## width of CNN
-    num_filter               = int(item.num_filter)               
-    ## Number of residual blocks in the model - depth of CNN
-    num_layers               = int(item.layers)                   
+    ## width of NN
+    num_filter               = int(item.num_filter)
+    ## Number of residual blocks in the model - depth of NN
+    num_layers               = int(item.layers)
     kernel_size              = int(item.kernel_size)
     ## Upscaling factor e.g. 2,4
-    scale                    = int(item.scale) 
-    ## Parameters for batch normalization                   
+    scale                    = int(item.scale)
+    ## Parameters for batch normalization
     momentum                 = float(item.momentum)
     epsilon                  = float(item.epsilon)
     lr_image                 = Input(shape=(None, None, 3))
+    ## set default ratio - not yet in hyperparamter structure
+    ratio                    = 8
     ## parameter not currently used but available
     ##   dropout_rate = float(item.dropout_rate)
 
     def activation_layer(activation, name):
+        """ activation layer with activation and name parameters"""
         if activation == 'relu':
             return layers.ReLU(name=name)
         if activation == 'leakyrelu':
             return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'swish':
+            return swish(name=name)
         if activation == 'prelu':
             return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
 
     def se_block(input_tensor, ratio=16):
+        """ Squeeze-and-Excitation block for feature enhancement """
         filters = input_tensor.shape[-1]
         se = GlobalAveragePooling2D()(input_tensor)
         se = Dense(filters // ratio, activation="relu")(se)
         se = Dense(filters, activation="sigmoid")(se)
         return Multiply()([input_tensor, se])
 
-    def residual_srresnet_block(layer_input, filters, block_number):
+    def residual_srresnet_block(layer_input, filters, ratio, block_number):
+        """Residual block described in Lim et al [ ]"""
         d = rrdb_block(layer_input, filters, block_number, kernel_size, padding)
-        d = se_block(d)
+        d = se_block(d,ratio)
         d = Add(name=f"add_res_{block_number}")([d, layer_input])
         return d
 
     def upsample_block(activation, layer_input, scale, i):
-        u = Conv2D(256, kernel_size=kernel_size, strides=strides, padding=padding, name=f"conv_up_{i}")(layer_input)
+        """ upsample block to increase the spatial resolution (height and width)
+            of the input feature maps """
+        u = Conv2D(256, kernel_size=kernel_size, strides=strides,\
+                   padding=padding, name=f"conv_up_{i}")(layer_input)
         if scale == 2:
             u = Lambda(lambda x: tf.nn.depth_to_space(x, scale), name=f"pix_shuf_{i}")(u)
         else:
-            u = UpSampling2D(size=(scale, scale), interpolation='bilinear', name=f"up_sample_{i}")(u)
+            u = UpSampling2D(size=(scale, scale), interpolation='bilinear',\
+                             name=f"up_sample_{i}")(u)
         return activation_layer(activation, name=f"activation_up_{i}")(u)
 
-    c1 = Conv2D(128, kernel_size=9, strides=strides, padding=padding, name="Conv_ip")(lr_image)
+    ## setting up the model
+    c1 = Conv2D(128, kernel_size=9, strides=strides, padding=padding,\
+                name="Conv_ip")(lr_image)
     c1 = activation_layer(activation, name="activation_ip")(c1)
-    r  = residual_srresnet_block(c1, num_filter, 0)
-
+    r  = residual_srresnet_block(c1, num_filter, ratio, 0)
+    ## set up a residual block for every layer
     for i in range(1, num_layers):
-        r = residual_srresnet_block(r, num_filter, i)
-
-    c2 = Conv2D(128, kernel_size=kernel_size, strides=strides, padding=padding, name="conv_out")(r)
+        r = residual_srresnet_block(r, num_filter, ratio, i)
+    c2 = Conv2D(128, kernel_size=kernel_size, strides=strides, padding=padding,\
+                name="conv_out")(r)
     c2 = BatchNormalization(momentum=momentum, epsilon=epsilon, name="BN_out")(c2)
     c2 = Add(name="add_out")([c2, c1])
     u1 = upsample_block(activation, c2, scale, 1)
-
     if scale == 4:
         u2 = upsample_block(activation, u1, 2, 2)
         u2 = upsample_block(activation, u2, 2, 3)
-
-    c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid", name="conv_final")(u1 if scale == 2 else u2)
+    c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",\
+                name="conv_final")(u1 if scale == 2 else u2)
     model = Model(lr_image, c3, name="SRResNet")
-
+    ## optimiser and loss function choices
     if optimizer_choice == 'Adam':
         optimizer = Adam(learning_rate=learning_rate)
     if optimizer_choice == 'AdamW':
@@ -1125,26 +1140,28 @@ def srresnet_tune_2(item):
     ## CNN defaults
     padding                  = str(item.padding)
     strides                  = int(item.strides)
-    ## width of CNN
-    num_filter               = int(item.num_filter)               
-    ## Number of residual blocks in the model - depth of CNN
-    num_layers               = int(item.layers)                   
+    ## width of NN
+    num_filter               = int(item.num_filter)
+    ## Number of residual blocks in the model - depth of NN
+    num_layers               = int(item.layers)
     kernel_size              = int(item.kernel_size)
     ## Upscaling factor e.g. 2,4
-    scale                    = int(item.scale) 
-    ## Parameters for batch normalization                   
+    scale                    = int(item.scale)
+    ## Parameters for batch normalization
     momentum                 = float(item.momentum)
     epsilon                  = float(item.epsilon)
     lr_image                 = Input(shape=(None, None, 3))
     ## parameter not currently used but available
     ##   dropout_rate = float(item.dropout_rate)
 
-    def activation_layer(activation,name):
+    def activation_layer(activation, name):
         """ activation layer with activation and name parameters"""
         if activation == 'relu':
             return layers.ReLU(name=name)
         if activation == 'leakyrelu':
             return layers.LeakyReLU(alpha=0.2, name=name)
+        if activation == 'swish':
+            return swish(name=name)
         if activation == 'prelu':
             return PReLU(Constant(value=0.25), shared_axes=[1, 2], name=name)
 
@@ -1202,14 +1219,13 @@ def srresnet_tune_2(item):
 
     # Upsampling (adjust based on your desired scale factor and output size)
     # u1 = upsample_block(activation, c2, scale, 1)  # Original upsampling call
-    # if scale == 4:  
+    # if scale == 4:
     #     u2 = upsample_block(activation, u1, 2, 2)
     #     u2 = upsample_block(activation, u2, 2, 3)
-        
     # Instead of the above, or after the above, add resizing:
     upscaled_output = layers.Resizing(448, 448)(c2)  # Resize to 448x448
 
-    ## 3 to match channels. kernel = 9 
+    ## 3 to match channels. kernel = 9
     c3 = Conv2D(3, kernel_size=9, strides=strides, padding=padding, activation="sigmoid",
                 name="conv_final")(upscaled_output)  # Use resized output
     model = Model(lr_image, c3, name="SRResNet")
@@ -1294,14 +1310,14 @@ def edsr_plus(item):
     ## CNN defaults
     padding                  = str(item.padding)
     strides                  = int(item.strides)
-    ## width of CNN
-    num_filters              = int(item.num_filter)               
-    ## Number of residual blocks in the model - depth of CNN
-    num_layers               = int(item.layers)                   
+    ## width of NN
+    num_filter               = int(item.num_filter)
+    ## Number of residual blocks in the model - depth of NN
+    num_layers               = int(item.layers)
     kernel_size              = int(item.kernel_size)
     ## Upscaling factor e.g. 2,4
-    scale                    = int(item.scale) 
-    ## Parameters for batch normalization                   
+    scale                    = int(item.scale)
+    ## Parameters for batch normalization
     momentum                 = float(item.momentum)
     epsilon                  = float(item.epsilon)
     lr_image                 = Input(shape=(None, None, 3))
@@ -1328,16 +1344,16 @@ def edsr_plus(item):
     ## Model Construction
     x_in  = Input(shape=(None, None, 3), name="LR Batch")
     x     = Lambda(normalize, name="normalize_input")(x_in)
-    x = r = Conv2D(num_filters, 3, padding=padding, name="Conv_ip")(x)
+    x = r = Conv2D(num_filter, 3, padding=padding, name="Conv_ip")(x)
     ## number of res blocks
     for i in range(num_layers):
-        r = residual_edsr_block(r, num_filters,kernel_size,
+        r = residual_edsr_block(r, num_filter,kernel_size,
                                 strides,padding,i)
-    c2    = Conv2D(num_filters, 3, padding=padding, name="conv_out")(r)
+    c2    = Conv2D(num_filter, 3, padding=padding, name="conv_out")(r)
     c2    = Add(name="add_out")([x, c2])
-    u1    = upsample_block(c2,num_filters, kernel_size,
+    u1    = upsample_block(c2,num_filter, kernel_size,
                            strides, padding, 1)
-    u2    = upsample_block(u1,num_filters, kernel_size,
+    u2    = upsample_block(u1,num_filter, kernel_size,
                            strides, padding, 2)
     c3    = Conv2D(3, 3, padding=padding, name="conv_final")(u2)
     x_out = Lambda(denormalize, name="denormalize_output")(c3)
@@ -1381,6 +1397,7 @@ def ssim_loss_plus(y_true, y_pred):
     # Convert to float32
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
+    ## print("check",y_true.shape,y_pred.shape)
     # Resize images if they have different sizes
     if y_true.shape[1] != y_pred.shape[1] or y_true.shape[2] != y_pred.shape[2]:
         # Use tf.keras.layers.Resizing instead of tf.image.resize
