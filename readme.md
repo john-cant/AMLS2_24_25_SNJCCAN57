@@ -89,7 +89,7 @@ These are specified by folder names in the dataset folder tree.
 _Models_
 -	SRResNet Base: This is the base model used to generate initial results using the Base scripts. It is fully functional but has a number of hyperparameters defaulted so is less flexible.
 -	SRResNet Tune: This is an improvement of the base model with a full set of hyperparameters that can be flexed although it still retains the same base architecture.
--	SRResNet Plus: Building on SRResNet Tune, this introduces an enhanced architecture with added RRDB functionality.
+-	SRResNet Plus: Building on SRResNet Tune, this introduces an enhanced architecture with added RRDB functionality and ration in se blocks set to more optimal value.
 -	EDSR: This is an implementation of simplified EDSR architecture, with ability to flex hyperparameters.
 -	SRResNet Tune 2: Based on the tune model above but with changes for Track 2 data image sizes.
 
